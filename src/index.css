@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #f8fafc; /* slate-50 */
+  color: #0f172a; /* slate-900 */
+}
+
+
+/* Item row focus highlight — must target <td> because outline/box-shadow on <tr>
+   are clipped by border-collapse + overflow-auto on the scroll container. */
+.pos-item-row:focus-within .pos-table-td {
+  background-color: #dbeafe; /* blue-100 */
+  border-top-color: #3b82f6;
+  border-bottom-color: #3b82f6;
+}
+.pos-item-row:focus-within .pos-table-td:first-child {
+  border-left: 2px solid #3b82f6;
+}
+.pos-item-row:focus-within .pos-table-td:last-child {
+  border-right: 2px solid #3b82f6;
+}
+
+/* Click-selected row (focus is elsewhere, e.g. after clicking a row then barcode gets focus) */
+.pos-item-row--selected .pos-table-td {
+  background-color: #eff6ff; /* blue-50 — lighter than focus state */
+}
+
+@layer components {
+  .pos-table-th {
+    @apply border border-slate-300 bg-slate-100 px-2 py-1.5 text-[11px] font-bold uppercase text-slate-700;
+  }
+  .pos-table-td {
+    @apply border border-slate-200 px-2 py-1 text-xs font-medium text-slate-900 bg-white;
+  }
+  .pos-input {
+    @apply h-8 border border-slate-300 bg-white px-2 text-sm focus:border-blue-500 focus:outline-none;
+  }
+  .action-btn {
+    @apply flex flex-col items-center justify-center gap-1 rounded border border-slate-300 bg-white px-3 py-1 hover:bg-slate-50 active:bg-slate-100 transition-colors;
+  }
+  .touch-action-btn {
+    @apply flex min-h-[86px] min-w-0 flex-col items-center justify-start gap-1.5 rounded-lg border border-white bg-white px-1.5 py-2 pt-3 text-center shadow-sm transition-all hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md active:translate-y-0 active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1;
+  }
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .printable-receipt,
+  .printable-receipt * {
+    visibility: visible;
+  }
+
+  .printable-receipt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 80mm !important;
+    box-shadow: none !important;
+    color: #000 !important;
+  }
+
+  @page {
+    size: 80mm auto;
+    margin: 4mm;
+  }
+}
