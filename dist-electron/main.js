@@ -48,6 +48,7 @@ async function initDb() {
       hsn TEXT,
       mrp BIGINT,
       price BIGINT,
+      discount BIGINT DEFAULT 0,
       tax_rate DECIMAL(5,2),
       is_weighable BOOLEAN DEFAULT 0,
       updated_at DATETIME
@@ -96,21 +97,35 @@ async function initDb() {
       last_pulled_at DATETIME
     );
   `);
-  const productCount = db.prepare("SELECT COUNT(*) as count FROM products").get().count;
-  if (productCount === 0) {
-    const insert = db.prepare(`
-      INSERT INTO products (id, variant_id, sku, barcode, name, mrp, price, tax_rate, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    `);
-    [
-      ["a0000001-0001-0001-0001-000000000001", "b0000001-0001-0001-0001-000000000001", "MILK-001", "8901001000011", "Fresh Milk 1L", 6e3, 5800, 5],
-      ["a0000001-0001-0001-0001-000000000002", "b0000001-0001-0001-0001-000000000002", "BRD-001", "8901001000028", "Whole Wheat Bread", 4500, 4e3, 0],
-      ["a0000001-0001-0001-0001-000000000003", "b0000001-0001-0001-0001-000000000003", "EGG-012", "8901001000035", "Organic Eggs (12pk)", 12e3, 11e3, 0],
-      ["a0000001-0001-0001-0001-000000000004", "b0000001-0001-0001-0001-000000000004", "SGR-001", "8901001000042", "Refined Sugar 1kg", 5e3, 4800, 12],
-      ["a0000001-0001-0001-0001-000000000005", "b0000001-0001-0001-0001-000000000005", "TEA-001", "8901001000059", "Assam Tea 250g", 25e3, 22e3, 18],
-      ["a0000001-0001-0001-0001-000000000006", "b0000001-0001-0001-0001-000000000006", "OIL-001", "8901001000066", "Sunflower Oil 1L", 18e3, 16500, 12]
-    ].forEach((product) => insert.run(...product));
-  }
+  db.exec(`DROP TABLE IF EXISTS products`);
+  db.exec(`
+    CREATE TABLE products (
+      id TEXT PRIMARY KEY,
+      variant_id TEXT,
+      sku TEXT UNIQUE,
+      barcode TEXT,
+      name TEXT,
+      hsn TEXT,
+      mrp BIGINT,
+      price BIGINT,
+      discount BIGINT DEFAULT 0,
+      tax_rate DECIMAL(5,2),
+      is_weighable BOOLEAN DEFAULT 0,
+      updated_at DATETIME
+    )
+  `);
+  const insert = db.prepare(`
+    INSERT INTO products (id, variant_id, sku, barcode, name, hsn, mrp, price, discount, tax_rate, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `);
+  [
+    ["a0000001-0001-0001-0001-000000000001", "b0000001-0001-0001-0001-000000000001", "MILK-001", "8901001000011", "Fresh Milk 1L", "0401", 6e3, 5800, 200, 5],
+    ["a0000001-0001-0001-0001-000000000002", "b0000001-0001-0001-0001-000000000002", "BRD-001", "8901001000028", "Whole Wheat Bread", "1905", 4500, 4e3, 500, 0],
+    ["a0000001-0001-0001-0001-000000000003", "b0000001-0001-0001-0001-000000000003", "EGG-012", "8901001000035", "Organic Eggs (12pk)", "0407", 12e3, 11e3, 1e3, 0],
+    ["a0000001-0001-0001-0001-000000000004", "b0000001-0001-0001-0001-000000000004", "SGR-001", "8901001000042", "Refined Sugar 1kg", "1701", 5e3, 4800, 200, 12],
+    ["a0000001-0001-0001-0001-000000000005", "b0000001-0001-0001-0001-000000000005", "TEA-001", "8901001000059", "Assam Tea 250g", "0902", 25e3, 22e3, 3e3, 18],
+    ["a0000001-0001-0001-0001-000000000006", "b0000001-0001-0001-0001-000000000006", "OIL-001", "8901001000066", "Sunflower Oil 1L", "1512", 18e3, 16500, 1500, 12]
+  ].forEach((product) => insert.run(...product));
   const cashierCount = db.prepare("SELECT COUNT(*) as count FROM cashiers").get().count;
   if (cashierCount === 0) {
     const insertCashier = db.prepare(`

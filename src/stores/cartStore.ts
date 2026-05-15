@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { db } from '../lib/db';
 import { enqueueOutbox } from '../lib/syncEngine';
+import { apiPricingPreview, loadApiConfig } from '../lib/api';
 
 interface CartItem {
   id: string;
@@ -11,8 +12,10 @@ interface CartItem {
   qty: number;
   mrp: bigint;
   price: bigint;
+  lineDiscount: bigint;
   taxRate: number;
   lineTotal: bigint;
+  appliedRules: Array<{ ruleId: string; name: string; discount: number }>;
 }
 
 export interface Product {
@@ -37,6 +40,7 @@ interface CartState {
   customer: Customer | null;
   subtotal: bigint;
   taxTotal: bigint;
+  orderDiscount: bigint;
   total: bigint;
   addItem: (searchTerm: string) => Promise<boolean>;
   addProduct: (product: Product) => void;
@@ -46,6 +50,7 @@ interface CartState {
   clearCart: () => void;
   replaceCart: (items: CartItem[], customer: Customer | null) => void;
   setCustomer: (customer: Customer) => void;
+  refreshPricing: () => Promise<void>;
   saveBill: (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string) => Promise<void>;
   loadBill: (invoiceNo: number) => Promise<{ items: CartItem[]; customer: Customer | null; amountReceived: string } | null>;
   getMaxInvoiceNo: () => Promise<number>;
@@ -56,6 +61,7 @@ export const useCartStore = create<CartState>((set, get) => ({
   customer: null,
   subtotal: 0n,
   taxTotal: 0n,
+  orderDiscount: 0n,
   total: 0n,
 
   addItem: async (searchTerm: string) => {
@@ -83,6 +89,7 @@ export const useCartStore = create<CartState>((set, get) => ({
       const item = items[existingIndex]!;
       item.qty += 1;
       item.lineTotal = BigInt(item.qty) * BigInt(item.price);
+      item.lineDiscount = BigInt(item.qty) * (BigInt(item.mrp) > BigInt(item.price) ? BigInt(item.mrp) - BigInt(item.price) : 0n);
     } else {
       items.push({
         id: product.id,
@@ -93,13 +100,16 @@ export const useCartStore = create<CartState>((set, get) => ({
         qty: 1,
         mrp: BigInt(product.mrp),
         price: BigInt(product.price),
+        lineDiscount: BigInt(product.mrp) > BigInt(product.price) ? BigInt(product.mrp) - BigInt(product.price) : 0n,
         taxRate: product.tax_rate,
         lineTotal: BigInt(product.price),
+        appliedRules: [],
       });
     }
 
     const { subtotal, taxTotal, total } = calculateTotals(items);
-    set({ items, subtotal, taxTotal, total });
+    set({ items, subtotal, taxTotal, orderDiscount: 0n, total });
+    get().refreshPricing();
   },
 
   searchProducts: async (searchTerm: string, limit = 25) => {
@@ -108,18 +118,26 @@ export const useCartStore = create<CartState>((set, get) => ({
     const term = searchTerm.trim();
     const allProducts = await db.query('SELECT * FROM products ORDER BY name ASC', []);
 
+    // Deduplicate by SKU to prevent glitches from duplicate DB rows
+    const seen = new Set<string>();
+    const uniqueProducts = allProducts.filter((p: Product) => {
+      if (!p.sku || seen.has(p.sku)) return false;
+      seen.add(p.sku);
+      return true;
+    });
+
     if (!term) {
-      return allProducts.slice(0, limit);
+      return uniqueProducts.slice(0, limit);
     }
 
-    const exactBarcodeMatches = allProducts.filter((product: Product) => String(product.barcode) === term);
+    const exactBarcodeMatches = uniqueProducts.filter((product: Product) => String(product.barcode) === term);
     if (exactBarcodeMatches.length > 0) {
       return exactBarcodeMatches.slice(0, limit);
     }
 
     const tokens = normalizeSearch(term).split(' ').filter(Boolean);
 
-    return allProducts
+    return uniqueProducts
       .map((product: Product) => {
         const barcode = normalizeSearch(product.barcode);
         const sku = normalizeSearch(product.sku);
@@ -150,7 +168,8 @@ export const useCartStore = create<CartState>((set, get) => ({
   removeItem: (variantId: string) => {
     const items = get().items.filter(i => i.variantId !== variantId);
     const { subtotal, taxTotal, total } = calculateTotals(items);
-    set({ items, subtotal, taxTotal, total });
+    set({ items, subtotal, taxTotal, orderDiscount: 0n, total });
+    get().refreshPricing();
   },
 
   updateQty: (variantId: string, qty: number) => {
@@ -161,22 +180,68 @@ export const useCartStore = create<CartState>((set, get) => ({
 
     const items = get().items.map(i => {
       if (i.variantId === variantId) {
-        return { ...i, qty, lineTotal: BigInt(Math.round(qty * 1000)) * BigInt(i.price) / 1000n };
+        const qtyFactor = BigInt(Math.round(qty * 1000));
+        const unitDiscount = BigInt(i.mrp) > BigInt(i.price) ? BigInt(i.mrp) - BigInt(i.price) : 0n;
+        return {
+          ...i,
+          qty,
+          lineTotal: qtyFactor * BigInt(i.price) / 1000n,
+          lineDiscount: qtyFactor * unitDiscount / 1000n,
+        };
       }
       return i;
     });
     const { subtotal, taxTotal, total } = calculateTotals(items);
-    set({ items, subtotal, taxTotal, total });
+    set({ items, subtotal, taxTotal, orderDiscount: 0n, total });
+    get().refreshPricing();
   },
 
-  clearCart: () => set({ items: [], subtotal: 0n, taxTotal: 0n, total: 0n, customer: null }),
+  clearCart: () => set({ items: [], subtotal: 0n, taxTotal: 0n, orderDiscount: 0n, total: 0n, customer: null }),
 
   replaceCart: (items, customer) => {
     const { subtotal, taxTotal, total } = calculateTotals(items);
-    set({ items, customer, subtotal, taxTotal, total });
+    set({ items, customer, subtotal, taxTotal, orderDiscount: 0n, total });
   },
   
   setCustomer: (customer) => set({ customer }),
+
+  refreshPricing: async () => {
+    const items = get().items;
+    if (!items.length) return;
+    try {
+      await loadApiConfig();
+      const previewItems = items.map((item) => ({
+        variantId: item.variantId,
+        qty: item.qty,
+        unitMrp: Number(item.mrp),
+        sellingPrice: Number(item.price),
+      }));
+      const settingsRows = db ? await db.query("SELECT key, value FROM settings WHERE key IN ('store_id')") : [];
+      const settings: Record<string, string> = {};
+      for (const row of settingsRows) settings[row.key] = row.value ?? '';
+      const preview = await apiPricingPreview(previewItems, { storeId: settings.store_id || undefined });
+      const updatedItems = items.map((item) => {
+        const p = preview.items.find((pi) => pi.variantId === item.variantId);
+        if (!p) return item;
+        return {
+          ...item,
+          lineDiscount: BigInt(p.lineDiscount),
+          lineTotal: BigInt(p.lineTotal),
+          appliedRules: p.appliedRules,
+        };
+      });
+      const { taxTotal } = calculateTotals(updatedItems);
+      set({
+        items: updatedItems,
+        subtotal: BigInt(preview.subtotal),
+        taxTotal,
+        orderDiscount: BigInt(preview.orderDiscount || 0),
+        total: BigInt(preview.total),
+      });
+    } catch (e) {
+      console.warn('[pricing] Preview failed, using local calc:', e);
+    }
+  },
 
   saveBill: async (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string) => {
     if (!db) return;
@@ -185,6 +250,7 @@ export const useCartStore = create<CartState>((set, get) => ({
       ...item,
       mrp: Number(item.mrp),
       price: Number(item.price),
+      lineDiscount: Number(item.lineDiscount),
       lineTotal: Number(item.lineTotal),
     })));
     const customerJson = state.customer ? JSON.stringify(state.customer) : null;
@@ -215,9 +281,14 @@ export const useCartStore = create<CartState>((set, get) => ({
       terminalId: settings.terminal_id || 'term-pos-01',
       shiftId: settings.shift_id || '00000000-0000-0000-0000-000000000000',
       customerId: undefined,
+      customer: state.customer ? {
+        name: state.customer.name || state.customer.mobile,
+        phone: state.customer.mobile,
+      } : undefined,
       items: state.items.map(item => ({
         variantId: item.variantId,
         qty: item.qty,
+        unitMrp: Number(item.mrp),
         unitPrice: Number(item.price),
       })),
       payments: [{
@@ -229,10 +300,6 @@ export const useCartStore = create<CartState>((set, get) => ({
       notes: `Printed by ${cashierName}`,
       cashierId,
     };
-
-    if (state.customer) {
-      payload.customerId = state.customer.code; // Using code as proxy; backend may need UUID
-    }
 
     await enqueueOutbox('order', 'create', payload);
   },
@@ -251,8 +318,10 @@ export const useCartStore = create<CartState>((set, get) => ({
       qty: Number(raw.qty),
       mrp: BigInt(raw.mrp as number),
       price: BigInt(raw.price as number),
+      lineDiscount: BigInt((raw.lineDiscount as number) ?? 0),
       taxRate: Number(raw.taxRate),
       lineTotal: BigInt(raw.lineTotal as number),
+      appliedRules: (raw.appliedRules as Array<{ ruleId: string; name: string; discount: number }>) ?? [],
     }));
     const customer: Customer | null = row.customer_json ? JSON.parse(row.customer_json) : null;
     const amountReceived = row.amount_received ? (Number(row.amount_received) / 100).toFixed(2) : '';
@@ -274,13 +343,14 @@ function calculateTotals(items: CartItem[]) {
     const lineSubtotal = item.lineTotal;
     // Assuming price is tax-inclusive for now, back-calculate tax if needed
     // Or if price is exclusive, add tax. Indian retail is usually inclusive.
-    subtotal += lineSubtotal;
+    subtotal += BigInt(Math.round(item.qty * 1000)) * BigInt(item.mrp) / 1000n;
     // Simplified tax calc: tax = total - (total / (1 + rate/100))
     const taxAmount = lineSubtotal - (lineSubtotal * 10000n / BigInt(Math.round(100 + item.taxRate) * 100));
     taxTotal += taxAmount;
   });
 
-  return { subtotal, taxTotal, total: subtotal };
+  const total = items.reduce((acc, item) => acc + item.lineTotal, 0n);
+  return { subtotal, taxTotal, total };
 }
 
 function normalizeSearch(value: string | number | bigint | null | undefined) {

@@ -119,7 +119,10 @@ export async function apiSyncPush(ops: any[], terminalId: string) {
     method: 'POST',
     body: JSON.stringify({ ops, terminalId }),
   });
-  if (!res.ok) throw new Error(`Sync push failed: ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(`Sync push failed: ${res.status} — ${errBody.message || errBody.code || 'Unknown error'}`);
+  }
   return res.json();
 }
 
@@ -128,7 +131,10 @@ export async function apiSyncPull(since: Record<string, string>, terminalId: str
     method: 'POST',
     body: JSON.stringify({ since, terminalId }),
   });
-  if (!res.ok) throw new Error(`Sync pull failed: ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(`Sync pull failed: ${res.status} — ${errBody.message || errBody.code || 'Unknown error'}`);
+  }
   return res.json();
 }
 
@@ -137,6 +143,40 @@ export async function apiSyncHeartbeat(terminalId: string, outboxDepth: number) 
     method: 'POST',
     body: JSON.stringify({ terminalId, outboxDepth }),
   });
-  if (!res.ok) throw new Error(`Heartbeat failed: ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(`Heartbeat failed: ${res.status} — ${errBody.message || errBody.code || 'Unknown error'}`);
+  }
   return res.json();
+}
+
+// Pricing preview
+export async function apiPricingPreview(
+  items: Array<{ variantId: string; qty: number; unitMrp: number; sellingPrice: number; categoryId?: string }>,
+  options: { storeId?: string; customerGroupId?: string; appliedCoupons?: string[] } = {},
+) {
+  const res = await apiFetch('/v1/pricing/preview', {
+    method: 'POST',
+    body: JSON.stringify({ items, ...options }),
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(`Pricing preview failed: ${res.status} — ${errBody.message || errBody.code || 'Unknown error'}`);
+  }
+  return res.json() as Promise<{
+    items: Array<{
+      variantId: string;
+      qty: number;
+      unitMrp: number;
+      sellingPrice: number;
+      lineDiscount: number;
+      lineTax: number;
+      lineTotal: number;
+      appliedRules: Array<{ ruleId: string; name: string; discount: number }>;
+    }>;
+    orderDiscount: number;
+    subtotal: number;
+    total: number;
+    appliedRules: Array<{ ruleId: string; name: string; discount: number }>;
+  }>;
 }

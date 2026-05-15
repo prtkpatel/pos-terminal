@@ -103,26 +103,27 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
     for (const p of result.products) {
       const variant = p.variants?.[0];
       const barcode = variant?.barcodes?.[0]?.barcode ?? '';
-      await db.execute(
-        `INSERT INTO products (id, variant_id, sku, barcode, name, hsn, mrp, price, tax_rate, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-         ON CONFLICT(id) DO UPDATE SET
-           variant_id=excluded.variant_id, sku=excluded.sku, barcode=excluded.barcode,
-           name=excluded.name, hsn=excluded.hsn, mrp=excluded.mrp, price=excluded.price,
-           tax_rate=excluded.tax_rate, updated_at=CURRENT_TIMESTAMP`,
-        [
-          p.id,
-          variant?.id ?? p.id,
-          variant?.sku ?? p.sku ?? '',
-          barcode,
-          p.name,
-          p.hsnCode ?? '',
-          variant?.mrp ?? 0,
-          variant?.price ?? 0,
-          variant?.taxRate ?? 0,
-        ]
-      );
-      productsCount++;
+      try {
+        await db.execute(
+          `INSERT OR REPLACE INTO products (id, variant_id, sku, barcode, name, hsn, mrp, price, discount, tax_rate, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          [
+            p.id,
+            variant?.id ?? p.id,
+            variant?.sku ?? p.sku ?? '',
+            barcode,
+            p.name,
+            p.hsnCode ?? '',
+            variant?.mrp ?? 0,
+            variant?.sellingPrice ?? variant?.mrp ?? 0,
+            Math.max(0, Number(variant?.mrp ?? 0) - Number(variant?.sellingPrice ?? variant?.mrp ?? 0)),
+            Number(p.taxRate) || 0,
+          ]
+        );
+        productsCount++;
+      } catch (e: any) {
+        console.error('[sync] Failed to upsert product:', p.id, p.name, e.message);
+      }
     }
     await setSyncState('products', result.serverNow);
   }

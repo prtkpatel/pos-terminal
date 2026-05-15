@@ -57,7 +57,7 @@ function ToolbarButton({
 }
 
 export function CheckoutScreen() {
-  const { items, customer, subtotal, taxTotal, total, addItem, addProduct, searchProducts, updateQty, removeItem, clearCart, replaceCart, setCustomer, saveBill, loadBill, getMaxInvoiceNo } = useCartStore();
+  const { items, customer, subtotal, taxTotal, orderDiscount, total, addItem, addProduct, searchProducts, updateQty, removeItem, clearCart, replaceCart, setCustomer, saveBill, loadBill, getMaxInvoiceNo } = useCartStore();
   const { cashier, logout } = useAuthStore();
   const { isOnline, isSyncing, lastSyncAt, outboxDepth, syncError, syncNow, refreshOutboxDepth } = useSyncStore();
   const [barcodeInput, setBarcodeInput] = useState('');
@@ -613,6 +613,7 @@ export function CheckoutScreen() {
   const receiptDate = new Date().toLocaleString();
   const cgst = taxTotal / 2n;
   const sgst = taxTotal - cgst;
+  const discountTotal = items.reduce((sum, item) => sum + item.lineDiscount, 0n) + orderDiscount;
   const formatMoney = (value: bigint | number) => `Rs ${(Number(value) / 100).toFixed(2)}`;
   const formatAmount = (value: bigint | number) => (Number(value) / 100).toFixed(2);
 
@@ -1012,10 +1013,10 @@ export function CheckoutScreen() {
                       <button type="button" tabIndex={-1} onClick={() => updateQty(item.variantId, item.qty + 1)} className="text-slate-400 hover:text-blue-600">+</button>
                     </div>
                   </td>
-                  <td className="pos-table-td text-right">{(Number(item.price) / 100).toFixed(2)}</td>
-                  <td className="pos-table-td text-right">{(Number(item.lineTotal) / 100).toFixed(2)}</td>
-                  <td className="pos-table-td text-center">0</td>
-                  <td className="pos-table-td text-right">0.00</td>
+                  <td className="pos-table-td text-right">{(Number(item.mrp) / 100).toFixed(2)}</td>
+                  <td className="pos-table-td text-right">{(Number(item.mrp) * item.qty / 100).toFixed(2)}</td>
+                  <td className="pos-table-td text-center">{Number(item.mrp) > 0 ? ((Number(item.lineDiscount) / (Number(item.mrp) * item.qty)) * 100).toFixed(1) : '0'}</td>
+                  <td className="pos-table-td text-right">{(Number(item.lineDiscount) / 100).toFixed(2)}</td>
                   <td className="pos-table-td text-right">{(Number(item.lineTotal) / 100).toFixed(2)}</td>
                   <td className="pos-table-td text-center">{item.taxRate}</td>
                   <td className="pos-table-td text-right">0.00</td>
@@ -1034,8 +1035,8 @@ export function CheckoutScreen() {
                   <td colSpan={5} className="px-4 py-0.5 text-right text-slate-500 uppercase text-[9px]">Summary</td>
                   <td className="px-2 py-0.5 text-right text-[11px]">{(Number(subtotal) / 100).toFixed(2)}</td>
                   <td className="px-2 py-0.5"></td>
-                  <td className="px-2 py-0.5 text-right text-[11px]">0.00</td>
-                  <td className="px-2 py-0.5 text-right text-[11px]">{(Number(subtotal) / 100).toFixed(2)}</td>
+                  <td className="px-2 py-0.5 text-right text-[11px]">{(Number(discountTotal) / 100).toFixed(2)}</td>
+                  <td className="px-2 py-0.5 text-right text-[11px]">{(Number(total) / 100).toFixed(2)}</td>
                   <td className="px-2 py-0.5"></td>
                   <td className="px-2 py-0.5 text-right text-[11px]">{(Number(taxTotal) / 100).toFixed(2)}</td>
                   <td className="px-2 py-0.5 text-right text-[11px] bg-slate-200">{(Number(total) / 100).toFixed(2)}</td>
@@ -1091,6 +1092,10 @@ export function CheckoutScreen() {
         <div className="flex flex-col">
           <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Tax Aggregate</span>
           <div className="text-2xl font-bold text-blue-400 leading-none mt-1">Rs {(Number(taxTotal) / 100).toFixed(2)}</div>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Discount</span>
+          <div className="text-2xl font-bold text-amber-300 leading-none mt-1">Rs {(Number(discountTotal) / 100).toFixed(2)}</div>
         </div>
         <div className="flex flex-col">
           <button
@@ -1174,9 +1179,15 @@ export function CheckoutScreen() {
                       <div className="grid grid-cols-[1fr_34px_58px_64px] gap-1">
                         <span>{item.sku}</span>
                         <span className="text-right">{item.qty}</span>
-                        <span className="text-right">{formatMoney(item.price)}</span>
+                        <span className="text-right">{formatMoney(item.mrp)}</span>
                         <span className="text-right">{formatMoney(item.lineTotal)}</span>
                       </div>
+                      {item.lineDiscount > 0n && (
+                        <div className="flex justify-between text-[10px]">
+                          <span>Discount</span>
+                          <span>-{formatMoney(item.lineDiscount)}</span>
+                        </div>
+                      )}
                     </div>
                   ))}
 
@@ -1184,7 +1195,7 @@ export function CheckoutScreen() {
 
                   <div className="space-y-1">
                     <div className="flex justify-between"><span>Gross Amount</span><span>{formatMoney(subtotal)}</span></div>
-                    <div className="flex justify-between"><span>Discount</span><span>Rs 0.00</span></div>
+                    <div className="flex justify-between"><span>Discount</span><span>{formatMoney(discountTotal)}</span></div>
                     <div className="flex justify-between"><span>CGST</span><span>{formatMoney(cgst)}</span></div>
                     <div className="flex justify-between"><span>SGST</span><span>{formatMoney(sgst)}</span></div>
                     <div className="border-t border-dashed border-slate-500 pt-2 text-base font-black">
