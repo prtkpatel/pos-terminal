@@ -27,6 +27,8 @@ export interface Product {
   mrp: number | bigint;
   price: number | bigint;
   tax_rate: number;
+  quantity: number;
+  reorder_level: number;
 }
 
 export interface Customer {
@@ -254,22 +256,40 @@ export const useCartStore = create<CartState>((set, get) => ({
       lineTotal: Number(item.lineTotal),
     })));
     const customerJson = state.customer ? JSON.stringify(state.customer) : null;
-    await db.execute(
-      `INSERT OR REPLACE INTO sales (id, invoice_no, items_json, customer_json, subtotal, tax_total, total, amount_received, cashier_id, cashier_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        `sale-${invoiceNo}`,
-        invoiceNo,
-        itemsJson,
-        customerJson,
-        Number(state.subtotal),
-        Number(state.taxTotal),
-        Number(state.total),
-        Math.round(Number(amountReceived || 0) * 100),
-        cashierId,
-        cashierName,
-      ]
-    );
+    
+    // START TRANSACTION for atomic update
+    await db.execute('BEGIN TRANSACTION', []);
+    try {
+      await db.execute(
+        `INSERT OR REPLACE INTO sales (id, invoice_no, items_json, customer_json, subtotal, tax_total, total, amount_received, cashier_id, cashier_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          `sale-${invoiceNo}`,
+          invoiceNo,
+          itemsJson,
+          customerJson,
+          Number(state.subtotal),
+          Number(state.taxTotal),
+          Number(state.total),
+          Math.round(Number(amountReceived || 0) * 100),
+          cashierId,
+          cashierName,
+        ]
+      );
+
+      // Local stock deduction
+      for (const item of state.items) {
+        await db.execute(
+          'UPDATE products SET quantity = quantity - ? WHERE variant_id = ?',
+          [item.qty, item.variantId]
+        );
+      }
+
+      await db.execute('COMMIT', []);
+    } catch (e) {
+      await db.execute('ROLLBACK', []);
+      throw e;
+    }
 
     // Build sync payload for backend
     const settingsRows = await db.query("SELECT key, value FROM settings WHERE key IN ('store_id','terminal_id','shift_id')");

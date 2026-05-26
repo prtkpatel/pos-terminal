@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { 
   Search, 
+  Camera,
   Info, 
   PauseCircle, 
   Save, 
@@ -64,6 +65,11 @@ export function CheckoutScreen() {
   const [productSuggestions, setProductSuggestions] = useState<Product[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [showProductFinder, setShowProductFinder] = useState(false);
+  const [showCameraScanner, setShowCameraScanner] = useState(false);
+  const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedCameraId, setSelectedCameraId] = useState('');
+  const [cameraStatus, setCameraStatus] = useState('');
+  const [cameraError, setCameraError] = useState('');
   const [productFinderSearch, setProductFinderSearch] = useState('');
   const [finderProducts, setFinderProducts] = useState<Product[]>([]);
   const [invoiceNo, setInvoiceNo] = useState(101);
@@ -76,6 +82,11 @@ export function CheckoutScreen() {
   const [heldSales, setHeldSales] = useState<HeldSale[]>([]);
   const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null);
   const barcodeInputRef = useRef<HTMLInputElement>(null);
+  const cameraVideoRef = useRef<HTMLVideoElement>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const cameraFrameRef = useRef<number | null>(null);
+  const lastDetectedBarcodeRef = useRef('');
+  const cameraScanCountRef = useRef(0);
   const productFinderInputRef = useRef<HTMLInputElement>(null);
   const customerMobileRef = useRef<HTMLInputElement>(null);
   const skipBlurFocusRef = useRef(false);
@@ -216,9 +227,8 @@ export function CheckoutScreen() {
     }
   }, [showSuggestions]);
 
-  const handleScan = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const term = barcodeInput.trim();
+  const scanTerm = async (rawTerm: string) => {
+    const term = rawTerm.trim();
     if (!term) return;
 
     const matches = await searchProducts(term, 10);
@@ -229,6 +239,7 @@ export function CheckoutScreen() {
 
     if (exactMatch) {
       addProduct(exactMatch);
+      setSelectedVariantId(exactMatch.variant_id);
       setBarcodeInput('');
       setProductSuggestions([]);
       setShowSuggestions(false);
@@ -237,6 +248,7 @@ export function CheckoutScreen() {
 
     if (matches.length === 1) {
       addProduct(matches[0]);
+      setSelectedVariantId(matches[0].variant_id);
       setBarcodeInput('');
       setProductSuggestions([]);
       setShowSuggestions(false);
@@ -251,7 +263,20 @@ export function CheckoutScreen() {
       return;
     }
 
-    await addItem(term);
+    const added = await addItem(term);
+    if (added) {
+      setBarcodeInput('');
+      setProductSuggestions([]);
+      setShowSuggestions(false);
+    } else {
+      setBarcodeInput(term);
+      openAlert(`No product found for "${term}".`, () => focusBarcodeInput());
+    }
+  };
+
+  const handleScan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await scanTerm(barcodeInput);
   };
 
   const focusBarcodeInput = () => {
@@ -284,6 +309,134 @@ export function CheckoutScreen() {
     confirmCallbacksRef.current = { onConfirm: onOk ?? (() => {}), onCancel: undefined };
     setConfirmModal({ open: true, message, isAlert: true });
   };
+
+  const stopCameraStream = () => {
+    if (cameraFrameRef.current !== null) {
+      window.cancelAnimationFrame(cameraFrameRef.current);
+      cameraFrameRef.current = null;
+    }
+    cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+    cameraStreamRef.current = null;
+    if (cameraVideoRef.current) {
+      cameraVideoRef.current.srcObject = null;
+    }
+  };
+
+  const closeCameraScanner = () => {
+    stopCameraStream();
+    setShowCameraScanner(false);
+    setCameraStatus('');
+    setCameraError('');
+    lastDetectedBarcodeRef.current = '';
+    cameraScanCountRef.current = 0;
+    focusBarcodeInput();
+  };
+
+  const openCameraScanner = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      openAlert('Camera scanning is not available in this terminal. Use USB scanner or manual barcode entry.', () => focusBarcodeInput());
+      return;
+    }
+
+    setCameraError('');
+    setCameraStatus('Checking cameras...');
+    setShowCameraScanner(true);
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter((device) => device.kind === 'videoinput');
+      setCameraDevices(videoDevices);
+      setSelectedCameraId((current) => current || videoDevices[0]?.deviceId || '');
+      setCameraStatus(videoDevices.length ? 'Point the camera at the barcode.' : 'Allow camera access to see available cameras.');
+    } catch (error) {
+      console.error('Failed to list cameras:', error);
+      setCameraError('Could not read camera list. Check camera permission and connection.');
+    }
+  };
+
+  const startCameraScanner = async (deviceId: string) => {
+    stopCameraStream();
+    setCameraError('');
+    setCameraStatus('Opening camera...');
+    lastDetectedBarcodeRef.current = '';
+    cameraScanCountRef.current = 0;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: deviceId
+          ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+          : { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+
+      cameraStreamRef.current = stream;
+      if (cameraVideoRef.current) {
+        cameraVideoRef.current.srcObject = stream;
+        await cameraVideoRef.current.play();
+      }
+
+      const BarcodeDetectorCtor = (window as typeof window & {
+        BarcodeDetector?: new (options?: { formats?: string[] }) => {
+          detect: (source: HTMLVideoElement) => Promise<Array<{ rawValue?: string }>>;
+        };
+      }).BarcodeDetector;
+
+      if (!BarcodeDetectorCtor) {
+        setCameraStatus('');
+        setCameraError('Camera opened, but barcode detection is not enabled in this terminal runtime. Restart the terminal after update, or use USB scanner/manual entry.');
+        return;
+      }
+
+      let detector: { detect: (source: HTMLVideoElement) => Promise<Array<{ rawValue?: string }>> };
+      try {
+        detector = new BarcodeDetectorCtor({
+          formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code'],
+        });
+      } catch {
+        detector = new BarcodeDetectorCtor();
+      }
+
+      setCameraStatus('Scanning... keep the barcode flat, bright, and inside the cyan box.');
+      const scanFrame = async () => {
+        const video = cameraVideoRef.current;
+        if (video && video.readyState >= 2) {
+          cameraScanCountRef.current += 1;
+          if (cameraScanCountRef.current % 45 === 0) {
+            setCameraStatus(`Scanning ${video.videoWidth || 0}x${video.videoHeight || 0} video... move closer if the barcode is small.`);
+          }
+          try {
+            const codes = await detector.detect(video);
+            const value = codes[0]?.rawValue?.trim();
+            if (value && value !== lastDetectedBarcodeRef.current) {
+              lastDetectedBarcodeRef.current = value;
+              stopCameraStream();
+              setShowCameraScanner(false);
+              await scanTerm(value);
+              focusBarcodeInput();
+              return;
+            }
+          } catch (error) {
+            console.error('Camera barcode detection failed:', error);
+          }
+        }
+        cameraFrameRef.current = window.requestAnimationFrame(scanFrame);
+      };
+
+      cameraFrameRef.current = window.requestAnimationFrame(scanFrame);
+    } catch (error) {
+      console.error('Failed to open camera:', error);
+      setCameraStatus('');
+      setCameraError('Could not open camera. Check permission, cable, and whether another app is using it.');
+    }
+  };
+
+  useEffect(() => {
+    if (!showCameraScanner) return;
+    void startCameraScanner(selectedCameraId);
+    return () => stopCameraStream();
+  }, [showCameraScanner, selectedCameraId]);
+
+  useEffect(() => () => stopCameraStream(), []);
 
   const handleConfirm = () => {
     setConfirmModal({ open: false, message: '' });
@@ -644,6 +797,14 @@ export function CheckoutScreen() {
         return;
       }
 
+      if (showCameraScanner) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeCameraScanner();
+        }
+        return;
+      }
+
       if (event.key === 'F2') {
         event.preventDefault();
         void openProductFinder();
@@ -694,7 +855,7 @@ export function CheckoutScreen() {
 
     window.addEventListener('keydown', handleShortcut);
     return () => window.removeEventListener('keydown', handleShortcut);
-  }, [showPayModal, showCustomerModal, showProductFinder, items, barcodeInput]);
+  }, [showPayModal, showCustomerModal, showProductFinder, showCameraScanner, items, barcodeInput]);
 
   return (
     <div className="flex h-full w-full flex-col bg-slate-50 overflow-hidden select-none">
@@ -815,9 +976,18 @@ export function CheckoutScreen() {
                     }
                   }
                 }}
-                className="h-16 w-full rounded-md border-2 border-blue-200 bg-blue-50 pl-14 pr-4 text-2xl font-black text-slate-950 outline-none focus:border-blue-600 focus:bg-white"
+                className="h-16 w-full rounded-md border-2 border-blue-200 bg-blue-50 pl-14 pr-16 text-2xl font-black text-slate-950 outline-none focus:border-blue-600 focus:bg-white"
                 placeholder="Scan barcode / SKU / item name"
               />
+              <button
+                type="button"
+                onClick={openCameraScanner}
+                title="Scan with camera"
+                aria-label="Scan barcode with camera"
+                className="absolute right-3 top-3 flex h-10 w-10 items-center justify-center rounded border border-blue-200 bg-white text-blue-700 shadow-sm hover:border-blue-500 hover:bg-blue-50"
+              >
+                <Camera className="h-5 w-5" />
+              </button>
               {showSuggestions && productSuggestions.length > 0 && (
                 <div className="absolute left-0 top-[70px] z-30 max-h-72 w-[760px] overflow-auto rounded-md border border-slate-300 bg-white shadow-xl">
                   <table className="w-full border-collapse text-[11px]">
@@ -1282,6 +1452,83 @@ export function CheckoutScreen() {
         </div>
       )}
 
+      {showCameraScanner && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+          <div className="flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-slate-300 bg-white shadow-2xl">
+            <div className="flex h-14 items-center justify-between border-b px-5">
+              <div>
+                <div className="text-sm font-black uppercase tracking-wider text-slate-800">Camera Barcode Scanner</div>
+                <div className="text-[10px] font-bold uppercase text-slate-400">Select the laptop camera or external webcam</div>
+              </div>
+              <button type="button" onClick={closeCameraScanner} className="text-slate-400 hover:text-slate-900">
+                <XCircle size={20} />
+              </button>
+            </div>
+
+            <div className="grid gap-4 bg-slate-50 p-4 md:grid-cols-[220px_minmax(0,1fr)]">
+              <div className="space-y-3">
+                <div>
+                  <label className="mb-1 block text-[10px] font-black uppercase tracking-wider text-slate-500">Camera</label>
+                  <select
+                    value={selectedCameraId}
+                    onChange={(event) => setSelectedCameraId(event.target.value)}
+                    className="h-10 w-full rounded border border-slate-300 bg-white px-3 text-xs font-bold text-slate-800 outline-none focus:border-blue-500"
+                  >
+                    {cameraDevices.length === 0 && <option value="">Default camera</option>}
+                    {cameraDevices.map((device, index) => (
+                      <option key={device.deviceId || index} value={device.deviceId}>
+                        {device.label || `Camera ${index + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="rounded border border-blue-200 bg-blue-50 p-3 text-xs font-bold leading-5 text-blue-900">
+                  Hold the barcode steady inside the frame. External USB webcams appear in this list after Windows detects them.
+                </div>
+
+                {cameraStatus && (
+                  <div className="rounded border border-emerald-200 bg-emerald-50 p-3 text-xs font-bold text-emerald-800">
+                    {cameraStatus}
+                  </div>
+                )}
+
+                {cameraError && (
+                  <div className="rounded border border-rose-200 bg-rose-50 p-3 text-xs font-bold leading-5 text-rose-700">
+                    {cameraError}
+                  </div>
+                )}
+              </div>
+
+              <div className="relative min-h-[360px] overflow-hidden rounded-md border border-slate-300 bg-slate-950">
+                <video
+                  ref={cameraVideoRef}
+                  muted
+                  playsInline
+                  className="h-full min-h-[360px] w-full object-cover"
+                />
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                  <div className="h-32 w-[72%] rounded border-2 border-cyan-300 shadow-[0_0_0_999px_rgba(15,23,42,0.28)]" />
+                </div>
+                <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded bg-slate-950/80 px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-white">
+                  Align barcode inside box
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 border-t px-5 py-3">
+              <button
+                type="button"
+                onClick={closeCameraScanner}
+                className="h-10 rounded border border-slate-300 bg-white px-4 text-xs font-black uppercase tracking-wider text-slate-600 hover:bg-slate-50"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showProductFinder && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
           <div className="flex max-h-[86vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-slate-300 bg-white shadow-2xl">
@@ -1320,6 +1567,7 @@ export function CheckoutScreen() {
                     <th className="border-b px-3 py-2 text-right">MRP</th>
                     <th className="border-b px-3 py-2 text-right">Price</th>
                     <th className="border-b px-3 py-2 text-center">GST</th>
+                    <th className="border-b px-3 py-2 text-center">Stock</th>
                     <th className="border-b px-3 py-2 text-right">Action</th>
                   </tr>
                 </thead>
@@ -1332,6 +1580,12 @@ export function CheckoutScreen() {
                       <td className="border-b px-3 py-2 text-right font-medium text-slate-500">{formatMoney(product.mrp)}</td>
                       <td className="border-b px-3 py-2 text-right font-black text-blue-700">{formatMoney(product.price)}</td>
                       <td className="border-b px-3 py-2 text-center font-bold text-slate-600">{product.tax_rate}%</td>
+                      <td className={cn(
+                        "border-b px-3 py-2 text-center font-bold",
+                        product.quantity <= product.reorder_level ? "text-red-600" : "text-green-600"
+                      )}>
+                        {product.quantity}
+                      </td>
                       <td className="border-b px-3 py-2 text-right">
                         <button
                           type="button"
@@ -1343,10 +1597,9 @@ export function CheckoutScreen() {
                       </td>
                     </tr>
                   ))}
-
                   {finderProducts.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="px-4 py-10 text-center text-sm font-bold text-slate-400">
+                      <td colSpan={8} className="px-4 py-10 text-center text-sm font-bold text-slate-400">
                         No products found
                       </td>
                     </tr>

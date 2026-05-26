@@ -38,7 +38,7 @@ export async function pushOutbox(): Promise<{ pushed: number; failed: number }> 
   await loadApiConfig();
 
   const pending = await db.query(
-    "SELECT * FROM outbox WHERE status = 'pending' OR (status = 'failed' AND retry_count < 5) ORDER BY created_at ASC LIMIT 50",
+    "SELECT * FROM outbox WHERE status = 'pending' OR (status = 'failed' AND retry_count < 50) ORDER BY created_at ASC LIMIT 50",
     []
   );
   if (!pending.length) return { pushed: 0, failed: 0 };
@@ -105,8 +105,8 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
       const barcode = variant?.barcodes?.[0]?.barcode ?? '';
       try {
         await db.execute(
-          `INSERT OR REPLACE INTO products (id, variant_id, sku, barcode, name, hsn, mrp, price, discount, tax_rate, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          `INSERT OR REPLACE INTO products (id, variant_id, sku, barcode, name, hsn, mrp, price, discount, tax_rate, quantity, reorder_level, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT quantity FROM products WHERE variant_id = ?), (SELECT reorder_level FROM products WHERE variant_id = ?), CURRENT_TIMESTAMP)`,
           [
             p.id,
             variant?.id ?? p.id,
@@ -118,6 +118,8 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
             variant?.sellingPrice ?? variant?.mrp ?? 0,
             Math.max(0, Number(variant?.mrp ?? 0) - Number(variant?.sellingPrice ?? variant?.mrp ?? 0)),
             Number(p.taxRate) || 0,
+            variant?.id ?? p.id,
+            variant?.id ?? p.id,
           ]
         );
         productsCount++;
@@ -126,6 +128,21 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
       }
     }
     await setSyncState('products', result.serverNow);
+  }
+
+  // Upsert inventory
+  if (result.inventory?.length) {
+    for (const inv of result.inventory) {
+      try {
+        await db.execute(
+          'UPDATE products SET quantity = ?, reorder_level = ?, updated_at = CURRENT_TIMESTAMP WHERE variant_id = ?',
+          [Number(inv.quantity) || 0, Number(inv.reorderLevel) || 0, inv.variantId]
+        );
+      } catch (e: any) {
+        console.error('[sync] Failed to update inventory:', inv.variantId, e.message);
+      }
+    }
+    await setSyncState('inventory', result.serverNow);
   }
 
   // Upsert customers
@@ -137,7 +154,6 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
   }
 
   if (result.categories?.length) await setSyncState('categories', result.serverNow);
-  if (result.inventory?.length) await setSyncState('inventory', result.serverNow);
   if (result.rules?.length) await setSyncState('rules', result.serverNow);
 
   return { products: productsCount, customers: customersCount };

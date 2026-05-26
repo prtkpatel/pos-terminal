@@ -28,6 +28,8 @@ describe('cartStore', () => {
       mrp: 1000,
       price: 900,
       tax_rate: 5,
+      quantity: 100,
+      reorder_level: 10,
     };
 
     useCartStore.getState().addProduct(product);
@@ -49,6 +51,8 @@ describe('cartStore', () => {
       mrp: 1000,
       price: 900,
       tax_rate: 5,
+      quantity: 100,
+      reorder_level: 10,
     };
 
     useCartStore.getState().addProduct(product);
@@ -70,6 +74,8 @@ describe('cartStore', () => {
       mrp: 1000,
       price: 900,
       tax_rate: 5,
+      quantity: 100,
+      reorder_level: 10,
     };
 
     useCartStore.getState().addProduct(product);
@@ -90,6 +96,8 @@ describe('cartStore', () => {
       mrp: 1000,
       price: 900,
       tax_rate: 5,
+      quantity: 100,
+      reorder_level: 10,
     };
 
     useCartStore.getState().addProduct(product);
@@ -110,6 +118,8 @@ describe('cartStore', () => {
       mrp: 1000,
       price: 900,
       tax_rate: 5,
+      quantity: 100,
+      reorder_level: 10,
     };
 
     useCartStore.getState().addProduct(product);
