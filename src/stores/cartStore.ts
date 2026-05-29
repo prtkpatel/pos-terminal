@@ -53,8 +53,8 @@ interface CartState {
   replaceCart: (items: CartItem[], customer: Customer | null) => void;
   setCustomer: (customer: Customer) => void;
   refreshPricing: () => Promise<void>;
-  saveBill: (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string) => Promise<void>;
-  loadBill: (invoiceNo: number) => Promise<{ items: CartItem[]; customer: Customer | null; amountReceived: string } | null>;
+  saveBill: (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string, paymentMode?: 'billing' | 'credit', paymentTender?: 'cash' | 'online') => Promise<void>;
+  loadBill: (invoiceNo: number) => Promise<{ items: CartItem[]; customer: Customer | null; amountReceived: string; paymentTender: 'cash' | 'online' } | null>;
   getMaxInvoiceNo: () => Promise<number>;
 }
 
@@ -222,6 +222,7 @@ export const useCartStore = create<CartState>((set, get) => ({
       const settings: Record<string, string> = {};
       for (const row of settingsRows) settings[row.key] = row.value ?? '';
       const preview = await apiPricingPreview(previewItems, { storeId: settings.store_id || undefined });
+      const gstEnabled = await isGstEnabled();
       const updatedItems = items.map((item) => {
         const p = preview.items.find((pi) => pi.variantId === item.variantId);
         if (!p) return item;
@@ -232,7 +233,7 @@ export const useCartStore = create<CartState>((set, get) => ({
           appliedRules: p.appliedRules,
         };
       });
-      const { taxTotal } = calculateTotals(updatedItems);
+      const { taxTotal } = calculateTotals(updatedItems, gstEnabled);
       set({
         items: updatedItems,
         subtotal: BigInt(preview.subtotal),
@@ -245,9 +246,17 @@ export const useCartStore = create<CartState>((set, get) => ({
     }
   },
 
-  saveBill: async (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string) => {
+  saveBill: async (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string, paymentMode = 'billing', paymentTender = 'cash') => {
     if (!db) return;
     const state = get();
+    if (paymentMode === 'credit' && !state.customer?.mobile?.trim()) {
+      throw new Error('Credit / khata bill requires a customer mobile number.');
+    }
+    if (paymentMode === 'credit' && state.items.length === 0) {
+      throw new Error('Credit / khata bill requires at least one item.');
+    }
+    const gstEnabled = await isGstEnabled();
+    const taxTotal = gstEnabled ? state.taxTotal : 0n;
     const itemsJson = JSON.stringify(state.items.map(item => ({
       ...item,
       mrp: Number(item.mrp),
@@ -261,17 +270,23 @@ export const useCartStore = create<CartState>((set, get) => ({
     await db.execute('BEGIN TRANSACTION', []);
     try {
       await db.execute(
-        `INSERT OR REPLACE INTO sales (id, invoice_no, items_json, customer_json, subtotal, tax_total, total, amount_received, cashier_id, cashier_name)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO sales (id, invoice_no, items_json, customer_json, subtotal, tax_total, total, amount_received, payment_mode, credit_due, cashier_id, cashier_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           `sale-${invoiceNo}`,
           invoiceNo,
           itemsJson,
           customerJson,
           Number(state.subtotal),
-          Number(state.taxTotal),
+          Number(taxTotal),
           Number(state.total),
-          Math.round(Number(amountReceived || 0) * 100),
+          paymentMode === 'credit'
+            ? 0
+            : paymentTender === 'online'
+              ? Number(state.total)
+              : Math.round(Number(amountReceived || 0) * 100),
+          paymentMode === 'credit' ? 'credit' : paymentTender,
+          paymentMode === 'credit' ? Number(state.total) : 0,
           cashierId,
           cashierName,
         ]
@@ -311,13 +326,20 @@ export const useCartStore = create<CartState>((set, get) => ({
         unitMrp: Number(item.mrp),
         unitPrice: Number(item.price),
       })),
-      payments: [{
-        method: 'cash',
-        amount: Number(state.total),
-        reference: `INV-${invoiceNo}`,
-      }],
+      payments: paymentMode === 'credit'
+        ? [{
+            method: 'khata',
+            amount: 0,
+            reference: `Credit bill INV-${invoiceNo}`,
+          }]
+        : [{
+            method: paymentTender === 'online' ? 'upi' : 'cash',
+            amount: Number(state.total),
+            reference: `${paymentTender === 'online' ? 'Online' : 'Cash'} INV-${invoiceNo}`,
+          }],
+      paymentMode,
       clientOpId: crypto.randomUUID(),
-      notes: `Printed by ${cashierName}`,
+      notes: `${paymentMode === 'credit' ? 'Credit bill' : paymentTender === 'online' ? 'Online paid bill' : 'Cash bill'} by ${cashierName}`,
       cashierId,
     };
 
@@ -345,7 +367,7 @@ export const useCartStore = create<CartState>((set, get) => ({
     }));
     const customer: Customer | null = row.customer_json ? JSON.parse(row.customer_json) : null;
     const amountReceived = row.amount_received ? (Number(row.amount_received) / 100).toFixed(2) : '';
-    return { items, customer, amountReceived };
+    return { items, customer, amountReceived, paymentTender: row.payment_mode === 'online' ? 'online' : 'cash' };
   },
 
   getMaxInvoiceNo: async () => {
@@ -355,7 +377,13 @@ export const useCartStore = create<CartState>((set, get) => ({
   },
 }));
 
-function calculateTotals(items: CartItem[]) {
+async function isGstEnabled() {
+  if (!db) return true;
+  const row = await db.get("SELECT value FROM settings WHERE key = 'gst_enabled'");
+  return row?.value !== 'false';
+}
+
+function calculateTotals(items: CartItem[], gstEnabled = true) {
   let subtotal = 0n;
   let taxTotal = 0n;
 
@@ -364,9 +392,11 @@ function calculateTotals(items: CartItem[]) {
     // Assuming price is tax-inclusive for now, back-calculate tax if needed
     // Or if price is exclusive, add tax. Indian retail is usually inclusive.
     subtotal += BigInt(Math.round(item.qty * 1000)) * BigInt(item.mrp) / 1000n;
-    // Simplified tax calc: tax = total - (total / (1 + rate/100))
-    const taxAmount = lineSubtotal - (lineSubtotal * 10000n / BigInt(Math.round(100 + item.taxRate) * 100));
-    taxTotal += taxAmount;
+    if (gstEnabled) {
+      // Simplified tax calc: tax = total - (total / (1 + rate/100))
+      const taxAmount = lineSubtotal - (lineSubtotal * 10000n / BigInt(Math.round(100 + item.taxRate) * 100));
+      taxTotal += taxAmount;
+    }
   });
 
   const total = items.reduce((acc, item) => acc + item.lineTotal, 0n);

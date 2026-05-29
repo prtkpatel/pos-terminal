@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "dist": "npm run build && electron-builder --win portable --publish never",
+    "dist:dir": "npm run build && electron-builder --win dir --publish never",
     "typecheck": "npx tsc --noEmit",
     "preview": "vite preview",
     "test": "vitest run",
@@ -14,6 +16,38 @@
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:headed": "playwright test --headed"
+  },
+  "build": {
+    "appId": "com.atulyam.pos.terminal",
+    "productName": "Atulyam POS Terminal",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false,
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    }
   },
   "dependencies": {
     "@pos/shared-types": "file:../pos-shared-types",

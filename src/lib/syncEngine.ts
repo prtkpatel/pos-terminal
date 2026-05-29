@@ -1,5 +1,5 @@
 import { db } from './db';
-import { apiSyncPush, apiSyncPull, apiSyncHeartbeat, loadApiConfig, getBaseUrl } from './api';
+import { apiGetSettings, apiSyncPush, apiSyncPull, apiSyncHeartbeat, loadApiConfig, getBaseUrl } from './api';
 
 let cachedTerminalId = '';
 
@@ -20,6 +20,7 @@ async function getSetting(key: string): Promise<string | null> {
 async function setSetting(key: string, value: string) {
   if (!db) return;
   await db.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [key, value]);
+  window.dispatchEvent(new CustomEvent('terminal-setting-updated', { detail: { key, value } }));
 }
 
 async function getSyncState(entity: string): Promise<string | null> {
@@ -149,14 +150,52 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
   if (result.customers?.length) {
     // Customers are not in terminal schema yet — store minimal info in settings or skip
     // For now we just count them
-    customersCount = result.customers.length;
+    for (const customer of result.customers) {
+      try {
+        const phone = String(customer.phone || '').replace(/\D/g, '');
+        await db.execute(
+          `INSERT OR REPLACE INTO customers (id, code, name, phone, email, gstin, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          [
+            customer.id,
+            customer.code || `C-${phone.slice(-4)}`,
+            customer.name || phone,
+            phone,
+            customer.email || '',
+            customer.gstin || '',
+          ]
+        );
+        customersCount++;
+      } catch (e: any) {
+        console.error('[sync] Failed to upsert customer:', customer.id, customer.name, e.message);
+      }
+    }
     await setSyncState('customers', result.serverNow);
   }
 
   if (result.categories?.length) await setSyncState('categories', result.serverNow);
   if (result.rules?.length) await setSyncState('rules', result.serverNow);
+  if (result.settings) {
+    await setSetting('gst_enabled', result.settings.gstEnabled === false ? 'false' : 'true');
+    await setSyncState('settings', result.serverNow);
+  }
 
   return { products: productsCount, customers: customersCount };
+}
+
+export async function refreshTerminalSettings(): Promise<{ gstEnabled: boolean } | null> {
+  if (!db) return null;
+  await loadApiConfig();
+  try {
+    const settings = await apiGetSettings();
+    const gstEnabled = settings?.tenant?.settings?.gstEnabled !== false;
+    await setSetting('gst_enabled', gstEnabled ? 'true' : 'false');
+    await setSyncState('settings', new Date().toISOString());
+    return { gstEnabled };
+  } catch (error) {
+    console.warn('[sync] Settings refresh failed:', error);
+    return null;
+  }
 }
 
 export async function sendHeartbeat(): Promise<void> {

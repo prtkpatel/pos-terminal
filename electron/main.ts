@@ -107,6 +107,16 @@ async function initDb() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS customers (
+      id TEXT PRIMARY KEY,
+      code TEXT,
+      name TEXT NOT NULL,
+      phone TEXT UNIQUE,
+      email TEXT,
+      gstin TEXT,
+      updated_at DATETIME
+    );
+
     CREATE TABLE IF NOT EXISTS sales (
       id TEXT PRIMARY KEY,
       invoice_no INTEGER NOT NULL,
@@ -116,6 +126,8 @@ async function initDb() {
       tax_total INTEGER,
       total INTEGER,
       amount_received INTEGER,
+      payment_mode TEXT DEFAULT 'billing',
+      credit_due INTEGER DEFAULT 0,
       cashier_id TEXT,
       cashier_name TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -131,6 +143,9 @@ async function initDb() {
       last_pulled_at DATETIME
     );
   `);
+
+  try { db.exec(`ALTER TABLE sales ADD COLUMN payment_mode TEXT DEFAULT 'billing'`); } catch {}
+  try { db.exec(`ALTER TABLE sales ADD COLUMN credit_due INTEGER DEFAULT 0`); } catch {}
 
   // FIX: Wipe and recreate products table to eliminate all duplicate/broken rows
   // caused by previous sync bugs (price=0, tax_rate=0). Sync will repopulate.

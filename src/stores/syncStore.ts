@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { pushOutbox, pullChanges, sendHeartbeat, getOutboxDepth, isOnline } from '../lib/syncEngine';
+import { pushOutbox, pullChanges, refreshTerminalSettings, sendHeartbeat, getOutboxDepth, isOnline } from '../lib/syncEngine';
 
 interface SyncState {
   isOnline: boolean;
@@ -42,6 +42,7 @@ export const useSyncStore = create<SyncState>((set, get) => ({
 
     // 2. Pull server changes
     try {
+      await refreshTerminalSettings();
       const result = await pullChanges();
       console.log('[sync] pullChanges:', result);
     } catch (e: any) {

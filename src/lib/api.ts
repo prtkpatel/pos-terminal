@@ -150,6 +150,25 @@ export async function apiSyncHeartbeat(terminalId: string, outboxDepth: number) 
   return res.json();
 }
 
+export async function apiGetSettings() {
+  const res = await apiFetch('/v1/settings/me');
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(`Settings fetch failed: ${res.status} - ${errBody.message || errBody.code || 'Unknown error'}`);
+  }
+  return res.json();
+}
+
+export async function apiCustomerLookup(phone: string) {
+  const res = await apiFetch(`/v1/customers/lookup?phone=${encodeURIComponent(phone)}`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(`Customer lookup failed: ${res.status} - ${errBody.message || errBody.code || 'Unknown error'}`);
+  }
+  return res.json() as Promise<{ id: string; name: string; phone?: string; email?: string; gstin?: string }>;
+}
+
 // Pricing preview
 export async function apiPricingPreview(
   items: Array<{ variantId: string; qty: number; unitMrp: number; sellingPrice: number; categoryId?: string }>,
