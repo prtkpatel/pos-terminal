@@ -226,7 +226,7 @@ async function initDb() {
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `);
   [
-    ['api_base_url', 'http://localhost:3000'],
+    ['api_base_url', 'http://173.212.230.242:3001'],
     ['terminal_id', '11111111-1111-1111-1111-111111111111'],
     ['store_id', '01733d49-696a-4f20-9aa3-6e0224319fb3'],
     ['shift_id', '22222222-2222-2222-2222-222222222222'],
@@ -279,6 +279,9 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
+      // The renderer only loads our own bundled files; disabling web security lets
+      // the packaged (file://) app call the remote API without CORS errors.
+      webSecurity: false,
     },
   });
 
