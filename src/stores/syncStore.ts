@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { pushOutbox, pullChanges, refreshTerminalSettings, sendHeartbeat, getOutboxDepth, isOnline } from '../lib/syncEngine';
+import { pushOutbox, pullChanges, refreshTerminalSettings, sendHeartbeat, getOutboxDepth, getFailedOutboxCount, isOnline } from '../lib/syncEngine';
 
 interface SyncState {
   isOnline: boolean;
@@ -7,6 +7,7 @@ interface SyncState {
   lastSyncAt: string | null;
   outboxDepth: number;
   outboxCount: number;
+  failedCount: number;
   syncError: string | null;
   checkOnline: () => void;
   syncNow: () => Promise<void>;
@@ -19,6 +20,7 @@ export const useSyncStore = create<SyncState>((set, get) => ({
   lastSyncAt: localStorage.getItem('pos_last_sync'),
   outboxDepth: 0,
   outboxCount: 0,
+  failedCount: 0,
   syncError: null,
 
   checkOnline: () => {
@@ -68,12 +70,14 @@ export const useSyncStore = create<SyncState>((set, get) => ({
     }
 
     const depth = await getOutboxDepth();
-    set({ isSyncing: false, outboxDepth: depth, outboxCount: depth });
+    const failed = await getFailedOutboxCount();
+    set({ isSyncing: false, outboxDepth: depth, outboxCount: depth, failedCount: failed });
   },
 
   refreshOutboxDepth: async () => {
     const depth = await getOutboxDepth();
-    set({ outboxDepth: depth, outboxCount: depth });
+    const failed = await getFailedOutboxCount();
+    set({ outboxDepth: depth, outboxCount: depth, failedCount: failed });
   },
 }));
 

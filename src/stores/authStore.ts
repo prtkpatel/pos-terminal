@@ -39,6 +39,20 @@ export const useAuthStore = create<AuthState>((set) => ({
         setTokens(data.accessToken, data.refreshToken);
         localStorage.setItem('pos_cashier', JSON.stringify(cashier));
         set({ cashier });
+        // Cache the real server user id + PIN locally so that a later OFFLINE login
+        // produces the same (valid) cashier id — otherwise offline bills can't sync.
+        if (db) {
+          try {
+            const existing = await db.get('SELECT id FROM cashiers WHERE username = ?', [normalizedUser]);
+            if (existing) {
+              await db.execute('UPDATE cashiers SET id = ?, name = ?, pin = ? WHERE username = ?', [data.user.id, data.user.name, pin.trim(), normalizedUser]);
+            } else {
+              await db.execute('INSERT INTO cashiers (id, username, name, pin) VALUES (?, ?, ?, ?)', [data.user.id, normalizedUser, data.user.name, pin.trim()]);
+            }
+          } catch {
+            // non-fatal: offline credential cache update failed
+          }
+        }
         return { success: true };
       } catch (e: any) {
         // If backend rejects, don't fall through to local — respect backend auth

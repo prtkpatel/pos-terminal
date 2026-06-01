@@ -45,12 +45,28 @@ export async function pushOutbox(): Promise<{ pushed: number; failed: number }> 
   if (!pending.length) return { pushed: 0, failed: 0 };
 
   const tid = await getTerminalId();
-  const ops = pending.map((row: any) => ({
-    opId: row.op_id,
-    entity: row.entity,
-    action: row.action,
-    payload: JSON.parse(row.payload),
-  }));
+
+  // Repair offline bills: a bill created while logged in offline captures the LOCAL
+  // cashier id (e.g. "admin"), which the server rejects as an unknown cashier. Before
+  // pushing, swap any non-UUID cashierId for a real server user id cached in the
+  // cashiers table (populated on the last successful online login / seed).
+  const isUuid = (v: any) =>
+    typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+  let serverCashierId: string | null = null;
+  try {
+    const c = await db.get("SELECT id FROM cashiers WHERE id GLOB '*-*-*-*-*' LIMIT 1");
+    if (c && isUuid(c.id)) serverCashierId = c.id;
+  } catch {
+    // ignore — best-effort repair
+  }
+
+  const ops = pending.map((row: any) => {
+    const payload = JSON.parse(row.payload);
+    if (row.entity === 'order' && !isUuid(payload.cashierId) && serverCashierId) {
+      payload.cashierId = serverCashierId;
+    }
+    return { opId: row.op_id, entity: row.entity, action: row.action, payload };
+  });
 
   try {
     const result = await apiSyncPush(ops, tid);
@@ -202,7 +218,9 @@ export async function sendHeartbeat(): Promise<void> {
   if (!db) return;
   await loadApiConfig();
   const tid = await getTerminalId();
-  const depthRow = await db.get("SELECT COUNT(*) as c FROM outbox WHERE status = 'pending'");
+  const depthRow = await db.get(
+    "SELECT COUNT(*) as c FROM outbox WHERE status = 'pending' OR (status = 'failed' AND retry_count < 50)"
+  );
   await apiSyncHeartbeat(tid, depthRow?.c ?? 0);
 }
 
@@ -218,7 +236,18 @@ export async function enqueueOutbox(entity: string, action: string, payload: Rec
 
 export async function getOutboxDepth(): Promise<number> {
   if (!db) return 0;
-  const row = await db.get("SELECT COUNT(*) as c FROM outbox WHERE status = 'pending'");
+  // Count unsynced sales: pending plus failed items still within the retry limit.
+  const row = await db.get(
+    "SELECT COUNT(*) as c FROM outbox WHERE status = 'pending' OR (status = 'failed' AND retry_count < 50)"
+  );
+  return row?.c ?? 0;
+}
+
+export async function getFailedOutboxCount(): Promise<number> {
+  if (!db) return 0;
+  const row = await db.get(
+    "SELECT COUNT(*) as c FROM outbox WHERE status = 'failed' AND retry_count < 50"
+  );
   return row?.c ?? 0;
 }
 

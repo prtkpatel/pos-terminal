@@ -112,7 +112,7 @@ async function cacheCustomer(customer: { id?: string; name?: string; phone?: str
 export function CheckoutScreen() {
   const { items, customer, subtotal, taxTotal, orderDiscount, total, addItem, addProduct, searchProducts, updateQty, removeItem, clearCart, replaceCart, setCustomer, saveBill, loadBill, getMaxInvoiceNo } = useCartStore();
   const { cashier, logout } = useAuthStore();
-  const { isOnline, isSyncing, lastSyncAt, outboxDepth, syncError, syncNow, refreshOutboxDepth } = useSyncStore();
+  const { isOnline, isSyncing, lastSyncAt, outboxDepth, failedCount, syncError, syncNow, refreshOutboxDepth } = useSyncStore();
   const [barcodeInput, setBarcodeInput] = useState('');
   const [productSuggestions, setProductSuggestions] = useState<Product[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -1454,20 +1454,22 @@ export function CheckoutScreen() {
             onClick={() => {
               if (syncError) {
                 openAlert(syncError, () => focusBarcodeInput());
+              } else if (failedCount > 0) {
+                openAlert(`${failedCount} sale(s) failed to sync. They will retry automatically on the next sync.`, () => focusBarcodeInput());
               }
               void syncNow();
               void refreshOutboxDepth();
             }}
-            title={syncError || undefined}
+            title={syncError || (failedCount > 0 ? `${failedCount} sale(s) failed to sync` : undefined)}
             className={cn(
               "flex items-center gap-1.5 rounded border px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition-colors",
-              syncError
+              syncError || failedCount > 0
                 ? "border-rose-700 bg-rose-900 text-rose-200 hover:bg-rose-800"
                 : "border-slate-600 bg-slate-700 text-slate-300 hover:bg-slate-600"
             )}
           >
             <span className={cn("h-2 w-2 rounded-full", isOnline ? "bg-emerald-500" : "bg-rose-500")} />
-            {isSyncing ? 'Syncing...' : syncError ? 'Sync Error' : outboxDepth > 0 ? `${outboxDepth} Pending` : 'Synced'}
+            {isSyncing ? 'Syncing...' : syncError ? 'Sync Error' : failedCount > 0 ? `${failedCount} Failed` : outboxDepth > 0 ? `${outboxDepth} Pending` : 'Synced'}
           </button>
           {lastSyncAt && (
             <span className="mt-1 text-[9px] font-bold text-slate-500">
