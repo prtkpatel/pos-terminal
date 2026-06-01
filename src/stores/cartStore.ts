@@ -311,6 +311,32 @@ export const useCartStore = create<CartState>((set, get) => ({
     const settings: Record<string, string> = {};
     for (const r of settingsRows) settings[r.key] = r.value ?? '';
 
+    // Stable outbox op_id — one entry per invoice, re-saves replace it rather than add.
+    const stableOpId = `sale-${invoiceNo}`;
+
+    // Check if this invoice was already successfully synced to the server.
+    // If so, skip re-enqueuing entirely to prevent server-side duplicates.
+    const existingOutbox = await db.get(
+      "SELECT status, payload FROM outbox WHERE op_id = ?",
+      [stableOpId]
+    );
+    if (existingOutbox?.status === 'synced') return;
+
+    // Stable clientOpId derived from terminal + invoice number so the backend's
+    // idempotency check (WHERE clientOpId = ?) fires correctly on re-saves.
+    // Format: reuse terminal UUID structure, replace last segment with invoice hex.
+    const termId = (settings.terminal_id || '00000000-0000-0000-0000-000000000000');
+    const hex = termId.replace(/[^a-f0-9]/gi, '').padStart(20, '0').slice(0, 20);
+    const invHex = invoiceNo.toString(16).padStart(12, '0');
+    const stableClientOpId = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${invHex}`;
+
+    // Remove any old duplicate pending/failed outbox entries for this invoice that
+    // were created before this fix (random op_ids, random clientOpIds).
+    await db.execute(
+      `DELETE FROM outbox WHERE entity = 'order' AND action = 'create' AND status != 'synced' AND op_id != ? AND payload LIKE ?`,
+      [stableOpId, `%INV-${invoiceNo}"%`]
+    );
+
     const payload: Record<string, unknown> = {
       storeId: settings.store_id || '00000000-0000-0000-0000-000000000000',
       terminalId: settings.terminal_id || 'term-pos-01',
@@ -338,12 +364,17 @@ export const useCartStore = create<CartState>((set, get) => ({
             reference: `${paymentTender === 'online' ? 'Online' : 'Cash'} INV-${invoiceNo}`,
           }],
       paymentMode,
-      clientOpId: crypto.randomUUID(),
+      clientOpId: stableClientOpId,
       notes: `${paymentMode === 'credit' ? 'Credit bill' : paymentTender === 'online' ? 'Online paid bill' : 'Cash bill'} by ${cashierName}`,
       cashierId,
     };
 
-    await enqueueOutbox('order', 'create', payload);
+    // Upsert with stable op_id — re-saves update the existing row, not add a new one.
+    await db.execute(
+      `INSERT OR REPLACE INTO outbox (op_id, entity, action, payload, status, retry_count, error)
+       VALUES (?, 'order', 'create', ?, 'pending', 0, NULL)`,
+      [stableOpId, JSON.stringify(payload)]
+    );
   },
 
   loadBill: async (invoiceNo: number) => {

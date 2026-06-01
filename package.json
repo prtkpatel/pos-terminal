@@ -18,8 +18,8 @@
     "test:e2e:headed": "playwright test --headed"
   },
   "build": {
-    "appId": "com.atulyam.pos.terminal",
-    "productName": "Atulyam POS Terminal",
+    "appId": "com.subhrajminimart.pos.terminal",
+    "productName": "Subhraj Mini Mart POS",
     "directories": {
       "output": "release"
     },
