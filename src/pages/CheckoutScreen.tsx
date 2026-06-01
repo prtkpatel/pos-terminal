@@ -129,6 +129,7 @@ export function CheckoutScreen() {
   const [paymentMode, setPaymentMode] = useState<'billing' | 'credit'>('billing');
   const [paymentTender, setPaymentTender] = useState<'cash' | 'online'>('cash');
   const [gstEnabled, setGstEnabled] = useState(true);
+  const [billDate, setBillDate] = useState<string | null>(null);
   const [showPayModal, setShowPayModal] = useState(false);
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [customerName, setCustomerName] = useState('');
@@ -196,6 +197,22 @@ export function CheckoutScreen() {
         if (confirmModalOpenRef.current) return;
         event.preventDefault();
         void printBill();
+      }
+
+      if (event.ctrlKey && event.key === 's') {
+        if (confirmModalOpenRef.current) return;
+        event.preventDefault();
+        void saveOnly();
+      }
+
+      if (event.key === 'F4') {
+        if (confirmModalOpenRef.current) return;
+        event.preventDefault();
+        if (paymentMode === 'credit') {
+          selectBillingMode();
+        } else {
+          selectCreditMode();
+        }
       }
 
       if (event.key === 'Escape') {
@@ -759,6 +776,7 @@ export function CheckoutScreen() {
       setPaymentMode('billing');
       setPaymentTender('cash');
       setInvoiceNo((current) => current + 1);
+      setBillDate(null);
       focusBarcodeInput();
     });
   };
@@ -778,6 +796,7 @@ export function CheckoutScreen() {
         setPaymentMode('billing');
         setPaymentTender('cash');
         setShowPayModal(false);
+        setBillDate(null);
         focusBarcodeInput();
       },
       () => focusBarcodeInput()
@@ -931,6 +950,48 @@ export function CheckoutScreen() {
     setPaymentMode('billing');
     setPaymentTender('cash');
     setInvoiceNo((current) => current + 1);
+    setBillDate(null);
+    focusBarcodeInput();
+  };
+
+  const saveOnly = async () => {
+    if (items.length === 0) {
+      openAlert('No items to save.', () => setShowPayModal(false));
+      return;
+    }
+
+    await refreshGstEnabled();
+    const received = Number(amountReceived || 0) * 100;
+    if (paymentMode === 'credit' && !customer?.mobile) {
+      openAlert('Add customer mobile before saving a credit / khata bill.', () => setShowCustomerModal(true));
+      return;
+    }
+    if (paymentMode === 'billing' && paymentTender === 'cash' && received < Number(total)) {
+      openAlert('Amount received is less than the net total.', () => focusAmountInput());
+      return;
+    }
+
+    if (cashier) {
+      try {
+        const receivedAmount = paymentMode === 'credit' || paymentTender === 'online'
+          ? '0'
+          : amountReceived;
+        await saveBill(invoiceNo, cashier.id, cashier.name, receivedAmount, paymentMode, paymentTender);
+      } catch (e) {
+        console.error('Failed to save bill:', e);
+        openAlert('Failed to save invoice. Please try again.', () => focusAmountInput());
+        return;
+      }
+    }
+
+    clearCart();
+    setSelectedVariantId(null);
+    setShowPayModal(false);
+    setAmountReceived('');
+    setPaymentMode('billing');
+    setPaymentTender('cash');
+    setInvoiceNo((current) => current + 1);
+    setBillDate(null);
     focusBarcodeInput();
   };
 
@@ -1055,12 +1116,14 @@ export function CheckoutScreen() {
                     setPaymentTender(bill.paymentTender);
                     setInvoiceNo(target);
                     setSelectedVariantId(bill.items[0]?.variantId ?? null);
+                    setBillDate(bill.createdAt);
                   } else {
                     setInvoiceNo(target);
                     clearCart();
                     setAmountReceived('');
                     setPaymentTender('cash');
                     setSelectedVariantId(null);
+                    setBillDate(null);
                   }
                   focusBarcodeInput();
                 }} className="flex h-9 w-9 items-center justify-center text-slate-500 hover:bg-slate-100"><ChevronLeft size={16}/></button>
@@ -1077,6 +1140,7 @@ export function CheckoutScreen() {
                     setPaymentTender(bill.paymentTender);
                     setInvoiceNo(target);
                     setSelectedVariantId(bill.items[0]?.variantId ?? null);
+                    setBillDate(bill.createdAt);
                   } else {
                     const max = await getMaxInvoiceNo();
                     const fresh = max + 1;
@@ -1085,6 +1149,7 @@ export function CheckoutScreen() {
                     setAmountReceived('');
                     setPaymentTender('cash');
                     setSelectedVariantId(null);
+                    setBillDate(null);
                   }
                   focusBarcodeInput();
                 }} className="flex h-9 w-9 items-center justify-center text-slate-500 hover:bg-slate-100"><ChevronRight size={16}/></button>
@@ -1092,7 +1157,9 @@ export function CheckoutScreen() {
             </div>
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="font-bold text-slate-500">Date</span>
-              <span className="font-black text-slate-800">{new Date().toLocaleDateString()}</span>
+              <span className="font-black text-slate-800">
+                {billDate ? new Date(billDate).toLocaleString() : new Date().toLocaleDateString()}
+              </span>
             </div>
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="font-bold text-slate-500">Customer</span>
@@ -1437,6 +1504,11 @@ export function CheckoutScreen() {
       {/* 4. FOOTER TOTALS AREA */}
       <div className="h-24 bg-slate-800 flex items-center px-8 gap-12 text-white">
         <div className="flex flex-col">
+          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Items</span>
+          <div className="text-2xl font-bold text-slate-200 leading-none mt-1">{items.length}</div>
+          <span className="text-[10px] font-bold text-slate-500">Qty: {items.reduce((sum, item) => sum + item.qty, 0)}</span>
+        </div>
+        <div className="flex flex-col">
           <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Gross Total</span>
           <div className="text-2xl font-bold text-emerald-400 leading-none mt-1">Rs {(Number(subtotal) / 100).toFixed(2)}</div>
         </div>
@@ -1603,7 +1675,7 @@ export function CheckoutScreen() {
                         onClick={selectCreditMode}
                         className={cn("h-10 rounded text-xs font-black uppercase tracking-wider", paymentMode === 'credit' ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50")}
                       >
-                        Credit / Khata
+                        Credit / Khata <span className={cn("ml-1 text-[10px] font-bold", paymentMode === 'credit' ? "opacity-60" : "opacity-40")}>F4</span>
                       </button>
                     </div>
                     {paymentMode === 'credit' ? (
@@ -1670,6 +1742,14 @@ export function CheckoutScreen() {
                     className="h-14 flex-1 rounded border border-slate-300 bg-white text-sm font-black uppercase tracking-wider text-slate-600 hover:bg-slate-50"
                   >
                     Close
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveOnly}
+                    className="h-14 flex-[2] rounded bg-emerald-500 text-lg font-black uppercase tracking-[0.18em] text-white shadow-lg shadow-emerald-500/20 hover:bg-emerald-600 active:scale-[0.99]"
+                  >
+                    <span className="block leading-none">Save</span>
+                    <span className="block text-[10px] font-bold tracking-widest opacity-70">Ctrl+S</span>
                   </button>
                   <button
                     type="button"

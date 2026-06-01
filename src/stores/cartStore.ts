@@ -54,7 +54,7 @@ interface CartState {
   setCustomer: (customer: Customer) => void;
   refreshPricing: () => Promise<void>;
   saveBill: (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string, paymentMode?: 'billing' | 'credit', paymentTender?: 'cash' | 'online') => Promise<void>;
-  loadBill: (invoiceNo: number) => Promise<{ items: CartItem[]; customer: Customer | null; amountReceived: string; paymentTender: 'cash' | 'online' } | null>;
+  loadBill: (invoiceNo: number) => Promise<{ items: CartItem[]; customer: Customer | null; amountReceived: string; paymentTender: 'cash' | 'online'; createdAt: string | null } | null>;
   getMaxInvoiceNo: () => Promise<number>;
 }
 
@@ -367,7 +367,7 @@ export const useCartStore = create<CartState>((set, get) => ({
     }));
     const customer: Customer | null = row.customer_json ? JSON.parse(row.customer_json) : null;
     const amountReceived = row.amount_received ? (Number(row.amount_received) / 100).toFixed(2) : '';
-    return { items, customer, amountReceived, paymentTender: row.payment_mode === 'online' ? 'online' : 'cash' };
+    return { items, customer, amountReceived, paymentTender: row.payment_mode === 'online' ? 'online' : 'cash', createdAt: row.created_at ?? null };
   },
 
   getMaxInvoiceNo: async () => {
