@@ -129,6 +129,7 @@ export function CheckoutScreen() {
   const [paymentMode, setPaymentMode] = useState<'billing' | 'credit'>('billing');
   const [paymentTender, setPaymentTender] = useState<'cash' | 'online'>('cash');
   const [gstEnabled, setGstEnabled] = useState(true);
+  const [storeInfo, setStoreInfo] = useState({ name: '', gstin: '', fssai: '', address: '' });
   const [showPayModal, setShowPayModal] = useState(false);
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [customerName, setCustomerName] = useState('');
@@ -171,6 +172,10 @@ export function CheckoutScreen() {
       if (!db) return;
       const row = await db.get("SELECT value FROM settings WHERE key = 'gst_enabled'");
       if (mounted) setGstEnabled(row?.value !== 'false');
+      const rows = await db.query("SELECT key, value FROM settings WHERE key IN ('store_name','store_gstin','store_fssai','store_address')");
+      const map: Record<string, string> = {};
+      for (const r of rows) map[r.key] = r.value ?? '';
+      if (mounted) setStoreInfo({ name: map.store_name || '', gstin: map.store_gstin || '', fssai: map.store_fssai || '', address: map.store_address || '' });
     };
     void loadGstEnabled().catch(() => undefined);
 
@@ -1499,11 +1504,11 @@ export function CheckoutScreen() {
               <div className="flex justify-center">
                 <div className="receipt-preview printable-receipt w-[320px] bg-white px-4 py-5 font-mono text-[11px] leading-tight text-slate-950 shadow-xl">
                   <div className="text-center">
-                    <div className="text-base font-black tracking-wide">KRUTIK POS MART</div>
+                    <div className="text-base font-black tracking-wide">{storeInfo.name || 'Subhraj Mini Mart'}</div>
                     <div>Tax Invoice / Bill of Supply</div>
-                    <div>Shop No. 12, Main Market, India</div>
-                    {gstEnabled && <div>GSTIN: 27ABCDE1234F1Z5</div>}
-                    <div>FSSAI: 10000000000000</div>
+                    {storeInfo.address ? <div>{storeInfo.address}</div> : null}
+                    {gstEnabled && storeInfo.gstin ? <div>GSTIN: {storeInfo.gstin}</div> : null}
+                    {storeInfo.fssai ? <div>FSSAI: {storeInfo.fssai}</div> : null}
                   </div>
 
                   <div className="my-3 border-t border-dashed border-slate-500" />

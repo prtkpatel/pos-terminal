@@ -206,6 +206,21 @@ export async function refreshTerminalSettings(): Promise<{ gstEnabled: boolean }
     const settings = await apiGetSettings();
     const gstEnabled = settings?.tenant?.settings?.gstEnabled !== false;
     await setSetting('gst_enabled', gstEnabled ? 'true' : 'false');
+
+    // Cache this terminal's store header (name / GSTIN / FSSAI / address) for the printed bill.
+    const stores: any[] = settings?.stores || [];
+    const storeIdRow = await db.get("SELECT value FROM settings WHERE key = 'store_id'");
+    const store = stores.find((s) => s.id === storeIdRow?.value) || stores[0];
+    if (store) {
+      const addr = store.address || {};
+      const addressLine = [addr.line1, addr.line2, addr.area, addr.city, addr.state, addr.pincode]
+        .filter(Boolean).join(', ');
+      await setSetting('store_name', store.name || '');
+      await setSetting('store_gstin', store.gstin || '');
+      await setSetting('store_fssai', store.fssaiNo || '');
+      await setSetting('store_address', addressLine);
+    }
+
     await setSyncState('settings', new Date().toISOString());
     return { gstEnabled };
   } catch (error) {
