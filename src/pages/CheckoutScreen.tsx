@@ -129,7 +129,7 @@ export function CheckoutScreen() {
   const [paymentMode, setPaymentMode] = useState<'billing' | 'credit'>('billing');
   const [paymentTender, setPaymentTender] = useState<'cash' | 'online'>('cash');
   const [gstEnabled, setGstEnabled] = useState(true);
-  const [storeInfo, setStoreInfo] = useState({ name: '', gstin: '', fssai: '', address: '' });
+  const [storeInfo, setStoreInfo] = useState({ name: '', gstin: '', fssai: '', address: '', phone: '' });
   const [showPayModal, setShowPayModal] = useState(false);
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [customerName, setCustomerName] = useState('');
@@ -172,10 +172,10 @@ export function CheckoutScreen() {
       if (!db) return;
       const row = await db.get("SELECT value FROM settings WHERE key = 'gst_enabled'");
       if (mounted) setGstEnabled(row?.value !== 'false');
-      const rows = await db.query("SELECT key, value FROM settings WHERE key IN ('store_name','store_gstin','store_fssai','store_address')");
+      const rows = await db.query("SELECT key, value FROM settings WHERE key IN ('store_name','store_gstin','store_fssai','store_address','store_phone')");
       const map: Record<string, string> = {};
       for (const r of rows) map[r.key] = r.value ?? '';
-      if (mounted) setStoreInfo({ name: map.store_name || '', gstin: map.store_gstin || '', fssai: map.store_fssai || '', address: map.store_address || '' });
+      if (mounted) setStoreInfo({ name: map.store_name || '', gstin: map.store_gstin || '', fssai: map.store_fssai || '', address: map.store_address || '', phone: map.store_phone || '' });
     };
     void loadGstEnabled().catch(() => undefined);
 
@@ -1507,6 +1507,7 @@ export function CheckoutScreen() {
                     <div className="text-base font-black tracking-wide">{storeInfo.name || 'Subhraj Mini Mart'}</div>
                     <div>Tax Invoice / Bill of Supply</div>
                     {storeInfo.address ? <div>{storeInfo.address}</div> : null}
+                    {storeInfo.phone ? <div>Mob: {storeInfo.phone}</div> : null}
                     {gstEnabled && storeInfo.gstin ? <div>GSTIN: {storeInfo.gstin}</div> : null}
                     {storeInfo.fssai ? <div>FSSAI: {storeInfo.fssai}</div> : null}
                   </div>

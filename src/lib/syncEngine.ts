@@ -218,6 +218,7 @@ export async function refreshTerminalSettings(): Promise<{ gstEnabled: boolean }
       await setSetting('store_name', store.name || '');
       await setSetting('store_gstin', store.gstin || '');
       await setSetting('store_fssai', store.fssaiNo || '');
+      await setSetting('store_phone', store.phone || '');
       await setSetting('store_address', addressLine);
     }
 
