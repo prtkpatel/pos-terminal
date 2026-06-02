@@ -214,6 +214,7 @@ async function initDb() {
     ['store_id', '33333333-3333-3333-3333-333333333333'],
     ['shift_id', '22222222-2222-2222-2222-222222222222'],
     ['tenant_id', 'd4122928-56ad-4494-89c4-38436fe95136'],
+    ['printer_name', '80mm Series Printer'],
   ].forEach((s) => upsertSetting.run(...s));
 
   [
@@ -313,4 +314,27 @@ ipcMain.handle('db:execute', (event, sql, params) => {
 
 ipcMain.handle('sys:get-path', (event, name) => {
   return app.getPath(name as any);
+});
+
+ipcMain.handle('print:get-printers', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return win?.webContents.getPrintersAsync() ?? [];
+});
+
+ipcMain.handle('print:silent', (event, deviceName?: string) => {
+  return new Promise<{ success: boolean; error?: string }>((resolve) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) { resolve({ success: false, error: 'No window' }); return; }
+    const opts: Electron.WebContentsPrintOptions = {
+      silent: true,
+      printBackground: false,
+      pageSize: { width: 72000, height: 3276000 }, // 72mm x 3276mm — matches 72(72)x3276 thermal roll
+    };
+    if (deviceName) opts.deviceName = deviceName;
+    console.log('[print:silent] deviceName:', deviceName ?? '(default)', 'opts:', opts);
+    win.webContents.print(opts, (success, errorType) => {
+      console.log('[print:silent] result:', success, errorType);
+      resolve({ success, error: errorType ?? undefined });
+    });
+  });
 });

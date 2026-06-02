@@ -8,5 +8,9 @@ contextBridge.exposeInMainWorld('api', {
   },
   sys: {
     getPath: (name: string) => ipcRenderer.invoke('sys:get-path', name),
+  },
+  print: {
+    silent: (deviceName?: string) => ipcRenderer.invoke('print:silent', deviceName),
+    getPrinters: () => ipcRenderer.invoke('print:get-printers'),
   }
 });

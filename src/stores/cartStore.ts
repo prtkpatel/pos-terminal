@@ -53,7 +53,7 @@ interface CartState {
   replaceCart: (items: CartItem[], customer: Customer | null) => void;
   setCustomer: (customer: Customer) => void;
   refreshPricing: () => Promise<void>;
-  saveBill: (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string, paymentMode?: 'billing' | 'credit', paymentTender?: 'cash' | 'online') => Promise<void>;
+  saveBill: (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string, paymentMode?: 'billing' | 'credit', paymentTender?: 'cash' | 'online', roundOff?: bigint) => Promise<void>;
   loadBill: (invoiceNo: number) => Promise<{ items: CartItem[]; customer: Customer | null; amountReceived: string; paymentTender: 'cash' | 'online'; createdAt: string | null } | null>;
   getMaxInvoiceNo: () => Promise<number>;
 }
@@ -246,7 +246,7 @@ export const useCartStore = create<CartState>((set, get) => ({
     }
   },
 
-  saveBill: async (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string, paymentMode = 'billing', paymentTender = 'cash') => {
+  saveBill: async (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string, paymentMode = 'billing', paymentTender = 'cash', roundOff = 0n) => {
     if (!db) return;
     const state = get();
     if (paymentMode === 'credit' && !state.customer?.mobile?.trim()) {
@@ -257,6 +257,7 @@ export const useCartStore = create<CartState>((set, get) => ({
     }
     const gstEnabled = await isGstEnabled();
     const taxTotal = gstEnabled ? state.taxTotal : 0n;
+    const effectiveTotal = state.total + roundOff;
     const itemsJson = JSON.stringify(state.items.map(item => ({
       ...item,
       mrp: Number(item.mrp),
@@ -279,14 +280,14 @@ export const useCartStore = create<CartState>((set, get) => ({
           customerJson,
           Number(state.subtotal),
           Number(taxTotal),
-          Number(state.total),
+          Number(effectiveTotal),
           paymentMode === 'credit'
             ? 0
             : paymentTender === 'online'
-              ? Number(state.total)
+              ? Number(effectiveTotal)
               : Math.round(Number(amountReceived || 0) * 100),
           paymentMode === 'credit' ? 'credit' : paymentTender,
-          paymentMode === 'credit' ? Number(state.total) : 0,
+          paymentMode === 'credit' ? Number(effectiveTotal) : 0,
           cashierId,
           cashierName,
         ]
@@ -360,7 +361,7 @@ export const useCartStore = create<CartState>((set, get) => ({
           }]
         : [{
             method: paymentTender === 'online' ? 'upi' : 'cash',
-            amount: Number(state.total),
+            amount: Number(effectiveTotal),
             reference: `${paymentTender === 'online' ? 'Online' : 'Cash'} INV-${invoiceNo}`,
           }],
       paymentMode,
