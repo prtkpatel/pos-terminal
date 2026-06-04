@@ -220,20 +220,19 @@ export async function refreshTerminalSettings(): Promise<{ gstEnabled: boolean }
     const gstEnabled = settings?.tenant?.settings?.gstEnabled !== false;
     await setSetting('gst_enabled', gstEnabled ? 'true' : 'false');
 
-    // Sync store header for receipt printing
-    const store = settings?.stores?.[0];
+    // Cache this terminal's store header (name / GSTIN / FSSAI / address) for the printed bill.
+    const stores: any[] = settings?.stores || [];
+    const storeIdRow = await db.get("SELECT value FROM settings WHERE key = 'store_id'");
+    const store = stores.find((s) => s.id === storeIdRow?.value) || stores[0];
     if (store) {
+      const addr = store.address || {};
+      const addressLine = [addr.line1, addr.line2, addr.area, addr.city, addr.state, addr.pincode]
+        .filter(Boolean).join(', ');
       await setSetting('store_name', store.name || '');
       await setSetting('store_gstin', store.gstin || '');
-      await setSetting('store_phone', store.phone || '');
       await setSetting('store_fssai', store.fssaiNo || '');
-      const addr = store.address;
-      if (addr && typeof addr === 'object') {
-        const parts = [addr.line1, addr.line2, addr.city, addr.state && addr.pincode ? `${addr.state} ${addr.pincode}` : (addr.state || addr.pincode)].filter(Boolean);
-        await setSetting('store_address', parts.join(', '));
-      } else if (typeof addr === 'string') {
-        await setSetting('store_address', addr);
-      }
+      await setSetting('store_phone', store.phone || '');
+      await setSetting('store_address', addressLine);
     }
 
     await setSyncState('settings', new Date().toISOString());
