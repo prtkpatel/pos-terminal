@@ -137,6 +137,17 @@ export const useCartStore = create<CartState>((set, get) => ({
       return exactBarcodeMatches.slice(0, limit);
     }
 
+    // Fallback: if 13-digit EAN, match by first 12 digits.
+    // Handles products stored with a wrong check digit — the scanner sends the GS1-correct
+    // check digit but the SQLite row has the original wrong one.
+    if (/^\d{13}$/.test(term)) {
+      const prefix = term.slice(0, 12);
+      const prefixMatches = uniqueProducts.filter((product: Product) => String(product.barcode).startsWith(prefix));
+      if (prefixMatches.length > 0) {
+        return prefixMatches.slice(0, limit);
+      }
+    }
+
     const tokens = normalizeSearch(term).split(' ').filter(Boolean);
 
     return uniqueProducts

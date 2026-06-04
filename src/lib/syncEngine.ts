@@ -1,6 +1,19 @@
 import { db } from './db';
 import { apiGetSettings, apiSyncPush, apiSyncPull, apiSyncHeartbeat, loadApiConfig, getBaseUrl } from './api';
 
+function ean13CheckDigit(base: string): string {
+  const digits = base.split('').map(Number);
+  const sum = digits.reduce((acc, d, i) => acc + d * (i % 2 === 0 ? 1 : 3), 0);
+  return String((10 - (sum % 10)) % 10);
+}
+
+function normalizeBarcode(barcode: string): string {
+  if (/^\d{13}$/.test(barcode)) {
+    return barcode.slice(0, 12) + ean13CheckDigit(barcode.slice(0, 12));
+  }
+  return barcode;
+}
+
 let cachedTerminalId = '';
 
 async function getTerminalId(): Promise<string> {
@@ -119,7 +132,7 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
   if (result.products?.length) {
     for (const p of result.products) {
       const variant = p.variants?.[0];
-      const barcode = variant?.barcodes?.[0]?.barcode ?? '';
+      const barcode = normalizeBarcode(variant?.barcodes?.[0]?.barcode ?? '');
       try {
         await db.execute(
           `INSERT OR REPLACE INTO products (id, variant_id, sku, barcode, name, hsn, mrp, price, discount, tax_rate, quantity, reorder_level, updated_at)
@@ -206,6 +219,23 @@ export async function refreshTerminalSettings(): Promise<{ gstEnabled: boolean }
     const settings = await apiGetSettings();
     const gstEnabled = settings?.tenant?.settings?.gstEnabled !== false;
     await setSetting('gst_enabled', gstEnabled ? 'true' : 'false');
+
+    // Sync store header for receipt printing
+    const store = settings?.stores?.[0];
+    if (store) {
+      await setSetting('store_name', store.name || '');
+      await setSetting('store_gstin', store.gstin || '');
+      await setSetting('store_phone', store.phone || '');
+      await setSetting('store_fssai', store.fssaiNo || '');
+      const addr = store.address;
+      if (addr && typeof addr === 'object') {
+        const parts = [addr.line1, addr.line2, addr.city, addr.state && addr.pincode ? `${addr.state} ${addr.pincode}` : (addr.state || addr.pincode)].filter(Boolean);
+        await setSetting('store_address', parts.join(', '));
+      } else if (typeof addr === 'string') {
+        await setSetting('store_address', addr);
+      }
+    }
+
     await setSyncState('settings', new Date().toISOString());
     return { gstEnabled };
   } catch (error) {

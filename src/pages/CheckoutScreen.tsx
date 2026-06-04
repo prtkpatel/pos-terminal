@@ -129,6 +129,10 @@ export function CheckoutScreen() {
   const [paymentMode, setPaymentMode] = useState<'billing' | 'credit'>('billing');
   const [paymentTender, setPaymentTender] = useState<'cash' | 'online'>('cash');
   const [gstEnabled, setGstEnabled] = useState(true);
+  const [storeName, setStoreName] = useState('');
+  const [storeAddress, setStoreAddress] = useState('');
+  const [storeFssai, setStoreFssai] = useState('');
+  const [storeGstin, setStoreGstin] = useState('');
   const [billDate, setBillDate] = useState<string | null>(null);
   const [roundOff, setRoundOff] = useState<bigint>(0n);
   const [quickItems, setQuickItems] = useState<Product[]>([]);
@@ -172,8 +176,20 @@ export function CheckoutScreen() {
     const loadGstEnabled = async () => {
       await refreshTerminalSettings();
       if (!db) return;
-      const row = await db.get("SELECT value FROM settings WHERE key = 'gst_enabled'");
-      if (mounted) setGstEnabled(row?.value !== 'false');
+      const [gstRow, nameRow, addrRow, fssaiRow, gstinRow] = await Promise.all([
+        db.get("SELECT value FROM settings WHERE key = 'gst_enabled'"),
+        db.get("SELECT value FROM settings WHERE key = 'store_name'"),
+        db.get("SELECT value FROM settings WHERE key = 'store_address'"),
+        db.get("SELECT value FROM settings WHERE key = 'store_fssai'"),
+        db.get("SELECT value FROM settings WHERE key = 'store_gstin'"),
+      ]);
+      if (mounted) {
+        setGstEnabled(gstRow?.value !== 'false');
+        if (nameRow?.value) setStoreName(nameRow.value);
+        if (addrRow?.value) setStoreAddress(addrRow.value);
+        if (fssaiRow?.value) setStoreFssai(fssaiRow.value);
+        if (gstinRow?.value) setStoreGstin(gstinRow.value);
+      }
     };
     void loadGstEnabled().catch(() => undefined);
 
@@ -228,6 +244,18 @@ export function CheckoutScreen() {
         event.preventDefault();
         // Previous bill → save only; new/current bill → print (save + print)
         void (billDate ? saveOnly() : printBill());
+      }
+
+      if (event.key === 'F2') {
+        if (confirmModalOpenRef.current) return;
+        event.preventDefault();
+        if (paymentMode === 'billing') selectPaymentTender('cash');
+      }
+
+      if (event.key === 'F3') {
+        if (confirmModalOpenRef.current) return;
+        event.preventDefault();
+        if (paymentMode === 'billing') selectPaymentTender('online');
       }
 
       if (event.key === 'F4') {
@@ -1611,9 +1639,11 @@ export function CheckoutScreen() {
               <div className="flex justify-center">
                 <div className="receipt-preview printable-receipt w-[320px] bg-white px-3 py-4 font-mono text-[11px] leading-tight text-slate-950 shadow-xl">
                   <div className="text-center">
-                    <div className="text-base font-black tracking-wide">SUBHRAJ MINI MART</div>
+                    <div className="text-base font-black tracking-wide">{(storeName || 'YOUR STORE').toUpperCase()}</div>
                     <div>Tax Invoice / Bill of Supply</div>
-                    <div>Shop No. 12, Main Market, India</div>
+                    {storeAddress && <div>{storeAddress}</div>}
+                    {storeGstin && <div>GSTIN: {storeGstin}</div>}
+                    {storeFssai && <div>FSSAI Reg. No.: {storeFssai}</div>}
                   </div>
 
                   <div className="my-3 border-t border-dashed border-slate-500" />
@@ -1678,7 +1708,6 @@ export function CheckoutScreen() {
                   <div className="text-center">
                     <div>Items: {items.length} | Qty: {items.reduce((sum, item) => sum + item.qty, 0)}</div>
                     <div className="mt-2 font-bold">Thank you. Visit again.</div>
-                    <div className="mt-2 tracking-[0.35em]">|||| ||| |||| ||</div>
                     <div>POS-{invoiceNo}</div>
                   </div>
                 </div>
@@ -1732,6 +1761,7 @@ export function CheckoutScreen() {
                             className={cn("flex h-12 items-center justify-center gap-2 rounded border text-xs font-black uppercase tracking-wider", paymentTender === 'cash' ? "border-amber-500 bg-amber-500 text-white" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50")}
                           >
                             <Banknote size={16} /> Cash
+                            <span className={cn("ml-1 text-[10px] font-bold", paymentTender === 'cash' ? "opacity-60" : "opacity-40")}>F2</span>
                           </button>
                           <button
                             type="button"
@@ -1739,6 +1769,7 @@ export function CheckoutScreen() {
                             className={cn("flex h-12 items-center justify-center gap-2 rounded border text-xs font-black uppercase tracking-wider", paymentTender === 'online' ? "border-blue-600 bg-blue-600 text-white" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50")}
                           >
                             <CreditCard size={16} /> Online
+                            <span className={cn("ml-1 text-[10px] font-bold", paymentTender === 'online' ? "opacity-60" : "opacity-40")}>F3</span>
                           </button>
                         </div>
                         {paymentTender === 'online' ? (
