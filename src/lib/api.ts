@@ -15,7 +15,7 @@ export function setUnauthorizedHandler(fn: () => void) {
 export async function loadApiConfig() {
   if (!db) return;
   const row = await db.get("SELECT value FROM settings WHERE key = 'api_base_url'");
-  API_CACHE.baseUrl = row?.value ?? 'https://api.subhrajsupermarket.in';
+  API_CACHE.baseUrl = row?.value ?? 'http://localhost:3000';
 }
 
 export function getBaseUrl() {
