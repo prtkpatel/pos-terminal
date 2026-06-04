@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { db } from '../lib/db';
-import { apiPinLogin, setTokens, clearTokens, getToken, loadApiConfig } from '../lib/api';
+import { apiPinLogin, setTokens, clearTokens, getToken, getRefreshToken, loadApiConfig, setUnauthorizedHandler, apiFetch } from '../lib/api';
 import { isOnline } from '../lib/syncEngine';
 
 export interface Cashier {
@@ -18,7 +18,14 @@ interface AuthState {
   restoreSession: () => Promise<void>;
 }
 
-export const useAuthStore = create<AuthState>((set) => ({
+export const useAuthStore = create<AuthState>((set, get) => {
+  // Register global 401 handler so any apiFetch that can't refresh → forces logout
+  setUnauthorizedHandler(() => {
+    localStorage.removeItem('pos_cashier');
+    set({ cashier: null });
+  });
+
+  return {
   cashier: null,
   isLoading: true,
 
@@ -91,12 +98,31 @@ export const useAuthStore = create<AuthState>((set) => ({
     if (raw) {
       try {
         const cashier = JSON.parse(raw) as Cashier;
-        // If we have a stored token, verify it's still valid by loading it
         const token = getToken();
-        if (token) {
-          set({ cashier });
+        const refresh = getRefreshToken();
+
+        if (token && isOnline()) {
+          // Verify token is still accepted by the server
+          try {
+            const res = await apiFetch('/v1/settings/me');
+            if (res.status === 401) {
+              // apiFetch already cleared tokens + called _onUnauthorized if refresh failed,
+              // but we handle it here too for the startup path (no cashier yet in state)
+              clearTokens();
+              localStorage.removeItem('pos_cashier');
+              set({ isLoading: false });
+              return;
+            }
+            set({ cashier });
+          } catch {
+            // Network error — trust the cached session for offline work
+            set({ cashier });
+          }
+        } else if (!token && !refresh) {
+          // No tokens at all — clear stale cashier cache
+          localStorage.removeItem('pos_cashier');
         } else {
-          // Token expired but cashier cached — keep session for offline work
+          // Offline or has tokens not yet loaded — keep session for offline work
           set({ cashier });
         }
       } catch {
@@ -105,4 +131,5 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
     set({ isLoading: false });
   },
-}));
+  };
+});

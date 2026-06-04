@@ -1,6 +1,19 @@
 import { db } from './db';
 import { apiGetSettings, apiSyncPush, apiSyncPull, apiSyncHeartbeat, loadApiConfig, getBaseUrl } from './api';
 
+function ean13CheckDigit(base: string): string {
+  const digits = base.split('').map(Number);
+  const sum = digits.reduce((acc, d, i) => acc + d * (i % 2 === 0 ? 1 : 3), 0);
+  return String((10 - (sum % 10)) % 10);
+}
+
+function normalizeBarcode(barcode: string): string {
+  if (/^\d{13}$/.test(barcode)) {
+    return barcode.slice(0, 12) + ean13CheckDigit(barcode.slice(0, 12));
+  }
+  return barcode;
+}
+
 let cachedTerminalId = '';
 
 async function getTerminalId(): Promise<string> {
@@ -119,7 +132,7 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
   if (result.products?.length) {
     for (const p of result.products) {
       const variant = p.variants?.[0];
-      const barcode = variant?.barcodes?.[0]?.barcode ?? '';
+      const barcode = normalizeBarcode(variant?.barcodes?.[0]?.barcode ?? '');
       try {
         await db.execute(
           `INSERT OR REPLACE INTO products (id, variant_id, sku, barcode, name, hsn, mrp, price, discount, tax_rate, quantity, reorder_level, updated_at)

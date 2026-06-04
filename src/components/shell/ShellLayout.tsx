@@ -23,7 +23,7 @@ export function ShellLayout() {
             <div className="h-6 w-6 rounded-md bg-blue-600 flex items-center justify-center">
               <Package size={14} className="text-white" />
             </div>
-            <span className="font-bold text-slate-800">Atulyam Pos</span>
+            <span className="font-bold text-slate-800">Subhraj Mini Mart</span>
           </div>
           <div className="h-4 w-[1px] bg-slate-200" />
           <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">

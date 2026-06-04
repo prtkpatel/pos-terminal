@@ -53,8 +53,8 @@ interface CartState {
   replaceCart: (items: CartItem[], customer: Customer | null) => void;
   setCustomer: (customer: Customer) => void;
   refreshPricing: () => Promise<void>;
-  saveBill: (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string, paymentMode?: 'billing' | 'credit', paymentTender?: 'cash' | 'online') => Promise<void>;
-  loadBill: (invoiceNo: number) => Promise<{ items: CartItem[]; customer: Customer | null; amountReceived: string; paymentTender: 'cash' | 'online' } | null>;
+  saveBill: (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string, paymentMode?: 'billing' | 'credit', paymentTender?: 'cash' | 'online', roundOff?: bigint) => Promise<void>;
+  loadBill: (invoiceNo: number) => Promise<{ items: CartItem[]; customer: Customer | null; amountReceived: string; paymentTender: 'cash' | 'online'; createdAt: string | null } | null>;
   getMaxInvoiceNo: () => Promise<number>;
 }
 
@@ -135,6 +135,17 @@ export const useCartStore = create<CartState>((set, get) => ({
     const exactBarcodeMatches = uniqueProducts.filter((product: Product) => String(product.barcode) === term);
     if (exactBarcodeMatches.length > 0) {
       return exactBarcodeMatches.slice(0, limit);
+    }
+
+    // Fallback: if 13-digit EAN, match by first 12 digits.
+    // Handles products stored with a wrong check digit — the scanner sends the GS1-correct
+    // check digit but the SQLite row has the original wrong one.
+    if (/^\d{13}$/.test(term)) {
+      const prefix = term.slice(0, 12);
+      const prefixMatches = uniqueProducts.filter((product: Product) => String(product.barcode).startsWith(prefix));
+      if (prefixMatches.length > 0) {
+        return prefixMatches.slice(0, limit);
+      }
     }
 
     const tokens = normalizeSearch(term).split(' ').filter(Boolean);
@@ -246,7 +257,7 @@ export const useCartStore = create<CartState>((set, get) => ({
     }
   },
 
-  saveBill: async (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string, paymentMode = 'billing', paymentTender = 'cash') => {
+  saveBill: async (invoiceNo: number, cashierId: string, cashierName: string, amountReceived: string, paymentMode = 'billing', paymentTender = 'cash', roundOff = 0n) => {
     if (!db) return;
     const state = get();
     if (paymentMode === 'credit' && !state.customer?.mobile?.trim()) {
@@ -257,6 +268,7 @@ export const useCartStore = create<CartState>((set, get) => ({
     }
     const gstEnabled = await isGstEnabled();
     const taxTotal = gstEnabled ? state.taxTotal : 0n;
+    const effectiveTotal = state.total + roundOff;
     const itemsJson = JSON.stringify(state.items.map(item => ({
       ...item,
       mrp: Number(item.mrp),
@@ -279,14 +291,14 @@ export const useCartStore = create<CartState>((set, get) => ({
           customerJson,
           Number(state.subtotal),
           Number(taxTotal),
-          Number(state.total),
+          Number(effectiveTotal),
           paymentMode === 'credit'
             ? 0
             : paymentTender === 'online'
-              ? Number(state.total)
+              ? Number(effectiveTotal)
               : Math.round(Number(amountReceived || 0) * 100),
           paymentMode === 'credit' ? 'credit' : paymentTender,
-          paymentMode === 'credit' ? Number(state.total) : 0,
+          paymentMode === 'credit' ? Number(effectiveTotal) : 0,
           cashierId,
           cashierName,
         ]
@@ -311,6 +323,32 @@ export const useCartStore = create<CartState>((set, get) => ({
     const settings: Record<string, string> = {};
     for (const r of settingsRows) settings[r.key] = r.value ?? '';
 
+    // Stable outbox op_id — one entry per invoice, re-saves replace it rather than add.
+    const stableOpId = `sale-${invoiceNo}`;
+
+    // Check if this invoice was already successfully synced to the server.
+    // If so, skip re-enqueuing entirely to prevent server-side duplicates.
+    const existingOutbox = await db.get(
+      "SELECT status, payload FROM outbox WHERE op_id = ?",
+      [stableOpId]
+    );
+    if (existingOutbox?.status === 'synced') return;
+
+    // Stable clientOpId derived from terminal + invoice number so the backend's
+    // idempotency check (WHERE clientOpId = ?) fires correctly on re-saves.
+    // Format: reuse terminal UUID structure, replace last segment with invoice hex.
+    const termId = (settings.terminal_id || '00000000-0000-0000-0000-000000000000');
+    const hex = termId.replace(/[^a-f0-9]/gi, '').padStart(20, '0').slice(0, 20);
+    const invHex = invoiceNo.toString(16).padStart(12, '0');
+    const stableClientOpId = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${invHex}`;
+
+    // Remove any old duplicate pending/failed outbox entries for this invoice that
+    // were created before this fix (random op_ids, random clientOpIds).
+    await db.execute(
+      `DELETE FROM outbox WHERE entity = 'order' AND action = 'create' AND status != 'synced' AND op_id != ? AND payload LIKE ?`,
+      [stableOpId, `%INV-${invoiceNo}"%`]
+    );
+
     const payload: Record<string, unknown> = {
       storeId: settings.store_id || '00000000-0000-0000-0000-000000000000',
       terminalId: settings.terminal_id || 'term-pos-01',
@@ -334,16 +372,21 @@ export const useCartStore = create<CartState>((set, get) => ({
           }]
         : [{
             method: paymentTender === 'online' ? 'upi' : 'cash',
-            amount: Number(state.total),
+            amount: Number(effectiveTotal),
             reference: `${paymentTender === 'online' ? 'Online' : 'Cash'} INV-${invoiceNo}`,
           }],
       paymentMode,
-      clientOpId: crypto.randomUUID(),
+      clientOpId: stableClientOpId,
       notes: `${paymentMode === 'credit' ? 'Credit bill' : paymentTender === 'online' ? 'Online paid bill' : 'Cash bill'} by ${cashierName}`,
       cashierId,
     };
 
-    await enqueueOutbox('order', 'create', payload);
+    // Upsert with stable op_id — re-saves update the existing row, not add a new one.
+    await db.execute(
+      `INSERT OR REPLACE INTO outbox (op_id, entity, action, payload, status, retry_count, error)
+       VALUES (?, 'order', 'create', ?, 'pending', 0, NULL)`,
+      [stableOpId, JSON.stringify(payload)]
+    );
   },
 
   loadBill: async (invoiceNo: number) => {
@@ -367,7 +410,7 @@ export const useCartStore = create<CartState>((set, get) => ({
     }));
     const customer: Customer | null = row.customer_json ? JSON.parse(row.customer_json) : null;
     const amountReceived = row.amount_received ? (Number(row.amount_received) / 100).toFixed(2) : '';
-    return { items, customer, amountReceived, paymentTender: row.payment_mode === 'online' ? 'online' : 'cash' };
+    return { items, customer, amountReceived, paymentTender: row.payment_mode === 'online' ? 'online' : 'cash', createdAt: row.created_at ?? null };
   },
 
   getMaxInvoiceNo: async () => {

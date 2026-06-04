@@ -187,6 +187,28 @@ export function CheckoutScreen() {
     return () => { mounted = false; };
   }, []);
 
+  // Reset round-off whenever cart total changes (e.g. item added/removed)
+  useEffect(() => { setRoundOff(0n); }, [total]);
+
+  // Load cheap products (≤ ₹10) as quick-add chips when pay modal opens
+  useEffect(() => {
+    if (!showPayModal || !db) return;
+    void db.query(
+      "SELECT variant_id, name, sku, mrp, price, tax_rate FROM products WHERE mrp > 0 AND mrp <= 1000 ORDER BY mrp ASC LIMIT 12"
+    ).then(rows => setQuickItems(rows.map(r => ({
+      id: String(r.variant_id),
+      variant_id: String(r.variant_id),
+      sku: String(r.sku || ''),
+      barcode: '',
+      name: String(r.name),
+      mrp: Number(r.mrp),
+      price: Number(r.price || r.mrp),
+      tax_rate: Number(r.tax_rate || 0),
+      quantity: 999,
+      reorder_level: 0,
+    })))).catch(() => {});
+  }, [showPayModal]);
+
   useEffect(() => {
     if (!showPayModal) {
       payModalJustOpenedRef.current = false;
@@ -203,6 +225,35 @@ export function CheckoutScreen() {
         void printBill();
       }
 
+      if (event.ctrlKey && event.key === 's') {
+        if (confirmModalOpenRef.current) return;
+        event.preventDefault();
+        // Previous bill → save only; new/current bill → print (save + print)
+        void (billDate ? saveOnly() : printBill());
+      }
+
+      if (event.key === 'F2') {
+        if (confirmModalOpenRef.current) return;
+        event.preventDefault();
+        if (paymentMode === 'billing') selectPaymentTender('cash');
+      }
+
+      if (event.key === 'F3') {
+        if (confirmModalOpenRef.current) return;
+        event.preventDefault();
+        if (paymentMode === 'billing') selectPaymentTender('online');
+      }
+
+      if (event.key === 'F4') {
+        if (confirmModalOpenRef.current) return;
+        event.preventDefault();
+        if (paymentMode === 'credit') {
+          selectBillingMode();
+        } else {
+          selectCreditMode();
+        }
+      }
+
       if (event.key === 'Escape') {
         if (confirmModalOpenRef.current) return;
         setShowPayModal(false);
@@ -215,7 +266,7 @@ export function CheckoutScreen() {
       window.clearTimeout(timer);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [showPayModal, amountReceived, paymentMode, paymentTender, items, total, customer]);
+  }, [showPayModal, amountReceived, paymentMode, paymentTender, items, total, customer, billDate]);
 
   useEffect(() => {
     let isCurrent = true;
@@ -764,6 +815,7 @@ export function CheckoutScreen() {
       setPaymentMode('billing');
       setPaymentTender('cash');
       setInvoiceNo((current) => current + 1);
+      setBillDate(null);
       focusBarcodeInput();
     });
   };
@@ -783,6 +835,7 @@ export function CheckoutScreen() {
         setPaymentMode('billing');
         setPaymentTender('cash');
         setShowPayModal(false);
+        setBillDate(null);
         focusBarcodeInput();
       },
       () => focusBarcodeInput()
@@ -902,7 +955,7 @@ export function CheckoutScreen() {
       openAlert('Add customer mobile before saving a credit / khata bill.', () => setShowCustomerModal(true));
       return;
     }
-    if (paymentMode === 'billing' && paymentTender === 'cash' && received < Number(total)) {
+    if (paymentMode === 'billing' && paymentTender === 'cash' && received < Number(effectiveTotal)) {
       openAlert('Amount received is less than the net total.', () => focusAmountInput());
       return;
     }
@@ -913,7 +966,7 @@ export function CheckoutScreen() {
         const receivedAmount = paymentMode === 'credit' || paymentTender === 'online'
           ? '0'
           : amountReceived;
-        await saveBill(invoiceNo, cashier.id, cashier.name, receivedAmount, paymentMode, paymentTender);
+        await saveBill(invoiceNo, cashier.id, cashier.name, receivedAmount, paymentMode, paymentTender, roundOff);
       } catch (e) {
         console.error('Failed to save bill:', e);
         openAlert('Failed to save invoice. Please try again.', () => focusAmountInput());
@@ -921,11 +974,23 @@ export function CheckoutScreen() {
       }
     }
 
-    // 2. Then print (best effort — don't block on printer failure)
+    // 2. Then print — silent (no dialog) if running in Electron, fallback to window.print()
     try {
-      window.print();
+      const api = (window as any).api;
+      if (api?.print?.silent) {
+        // Read printer name from settings (set via Settings page)
+        const printerRow = db ? await db.get("SELECT value FROM settings WHERE key = 'printer_name'") : null;
+        const printerName: string | undefined = printerRow?.value || undefined;
+        const result = await api.print.silent(printerName) as { success: boolean; error?: string };
+        if (!result.success) {
+          console.warn('[print] Silent print failed:', result.error, '— falling back to window.print()');
+          window.print();
+        }
+      } else {
+        window.print();
+      }
     } catch {
-      // No printer or print cancelled — invoice is already saved
+      // No printer or print failed — invoice is already saved
     }
 
     // 3. Reset for next sale
@@ -935,14 +1000,59 @@ export function CheckoutScreen() {
     setAmountReceived('');
     setPaymentMode('billing');
     setPaymentTender('cash');
+    setRoundOff(0n);
     setInvoiceNo((current) => current + 1);
+    setBillDate(null);
     focusBarcodeInput();
   };
 
-  const cashBack = paymentMode === 'credit' || paymentTender === 'online' ? 0 : amountReceived ? (Number(amountReceived) * 100 - Number(total)) / 100 : 0;
-  const paidAmount = paymentMode === 'credit' ? 0 : paymentTender === 'online' ? Number(total) : Number(amountReceived || 0) * 100;
+  const saveOnly = async () => {
+    if (items.length === 0) {
+      openAlert('No items to save.', () => setShowPayModal(false));
+      return;
+    }
+
+    await refreshGstEnabled();
+    const received = Number(amountReceived || 0) * 100;
+    if (paymentMode === 'credit' && !customer?.mobile) {
+      openAlert('Add customer mobile before saving a credit / khata bill.', () => setShowCustomerModal(true));
+      return;
+    }
+    if (paymentMode === 'billing' && paymentTender === 'cash' && received < Number(effectiveTotal)) {
+      openAlert('Amount received is less than the net total.', () => focusAmountInput());
+      return;
+    }
+
+    if (cashier) {
+      try {
+        const receivedAmount = paymentMode === 'credit' || paymentTender === 'online'
+          ? '0'
+          : amountReceived;
+        await saveBill(invoiceNo, cashier.id, cashier.name, receivedAmount, paymentMode, paymentTender, roundOff);
+      } catch (e) {
+        console.error('Failed to save bill:', e);
+        openAlert('Failed to save invoice. Please try again.', () => focusAmountInput());
+        return;
+      }
+    }
+
+    clearCart();
+    setSelectedVariantId(null);
+    setShowPayModal(false);
+    setAmountReceived('');
+    setPaymentMode('billing');
+    setPaymentTender('cash');
+    setRoundOff(0n);
+    setInvoiceNo((current) => current + 1);
+    setBillDate(null);
+    focusBarcodeInput();
+  };
+
+  const effectiveTotal = total + roundOff;
+  const cashBack = paymentMode === 'credit' || paymentTender === 'online' ? 0 : amountReceived ? (Number(amountReceived) * 100 - Number(effectiveTotal)) / 100 : 0;
+  const paidAmount = paymentMode === 'credit' ? 0 : paymentTender === 'online' ? Number(effectiveTotal) : Number(amountReceived || 0) * 100;
   const paymentLabel = paymentMode === 'credit' ? 'Credit Due' : paymentTender === 'online' ? 'Online Paid' : 'Cash Paid';
-  const receiptDate = new Date().toLocaleString();
+  const receiptDate = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
   const cgst = taxTotal / 2n;
   const sgst = taxTotal - cgst;
   const visibleTaxTotal = gstEnabled ? taxTotal : 0n;
@@ -1060,12 +1170,14 @@ export function CheckoutScreen() {
                     setPaymentTender(bill.paymentTender);
                     setInvoiceNo(target);
                     setSelectedVariantId(bill.items[0]?.variantId ?? null);
+                    setBillDate(bill.createdAt);
                   } else {
                     setInvoiceNo(target);
                     clearCart();
                     setAmountReceived('');
                     setPaymentTender('cash');
                     setSelectedVariantId(null);
+                    setBillDate(null);
                   }
                   focusBarcodeInput();
                 }} className="flex h-9 w-9 items-center justify-center text-slate-500 hover:bg-slate-100"><ChevronLeft size={16}/></button>
@@ -1082,6 +1194,7 @@ export function CheckoutScreen() {
                     setPaymentTender(bill.paymentTender);
                     setInvoiceNo(target);
                     setSelectedVariantId(bill.items[0]?.variantId ?? null);
+                    setBillDate(bill.createdAt);
                   } else {
                     const max = await getMaxInvoiceNo();
                     const fresh = max + 1;
@@ -1090,6 +1203,7 @@ export function CheckoutScreen() {
                     setAmountReceived('');
                     setPaymentTender('cash');
                     setSelectedVariantId(null);
+                    setBillDate(null);
                   }
                   focusBarcodeInput();
                 }} className="flex h-9 w-9 items-center justify-center text-slate-500 hover:bg-slate-100"><ChevronRight size={16}/></button>
@@ -1097,7 +1211,9 @@ export function CheckoutScreen() {
             </div>
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="font-bold text-slate-500">Date</span>
-              <span className="font-black text-slate-800">{new Date().toLocaleDateString()}</span>
+              <span className="font-black text-slate-800">
+                {billDate ? new Date(billDate).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
+              </span>
             </div>
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="font-bold text-slate-500">Customer</span>
@@ -1442,6 +1558,11 @@ export function CheckoutScreen() {
       {/* 4. FOOTER TOTALS AREA */}
       <div className="h-24 bg-slate-800 flex items-center px-8 gap-12 text-white">
         <div className="flex flex-col">
+          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Items</span>
+          <div className="text-2xl font-bold text-slate-200 leading-none mt-1">{items.length}</div>
+          <span className="text-[10px] font-bold text-slate-500">Qty: {items.reduce((sum, item) => sum + item.qty, 0)}</span>
+        </div>
+        <div className="flex flex-col">
           <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Gross Total</span>
           <div className="text-2xl font-bold text-emerald-400 leading-none mt-1">Rs {(Number(subtotal) / 100).toFixed(2)}</div>
         </div>
@@ -1502,7 +1623,7 @@ export function CheckoutScreen() {
 
             <div className="grid max-h-[calc(100vh-8rem)] grid-cols-[minmax(320px,420px)_1fr] gap-6 overflow-auto p-6">
               <div className="flex justify-center">
-                <div className="receipt-preview printable-receipt w-[320px] bg-white px-4 py-5 font-mono text-[11px] leading-tight text-slate-950 shadow-xl">
+                <div className="receipt-preview printable-receipt w-[320px] bg-white px-3 py-4 font-mono text-[11px] leading-tight text-slate-950 shadow-xl">
                   <div className="text-center">
                     <div className="text-base font-black tracking-wide">{storeInfo.name || 'Subhraj Mini Mart'}</div>
                     <div>Tax Invoice / Bill of Supply</div>
@@ -1515,16 +1636,15 @@ export function CheckoutScreen() {
                   <div className="my-3 border-t border-dashed border-slate-500" />
 
                   <div className="grid grid-cols-2 gap-y-1">
-                    <span>Inv No</span><span className="text-right">POS-{invoiceNo}</span>
+                    <span>Inv No</span><span className="text-right">INV-{invoiceNo}</span>
                     <span>Date</span><span className="text-right">{receiptDate}</span>
-                    <span>Terminal</span><span className="text-right">POS-01</span>
-                    <span>Cashier</span><span className="text-right">Admin</span>
+                    <span>Cashier</span><span className="text-right">{cashier?.name || 'Cashier'}</span>
                     <span>Customer</span><span className="text-right">{customer?.name || customer?.mobile || 'Walk-in'}</span>
                   </div>
 
                   <div className="my-3 border-t border-dashed border-slate-500" />
 
-                  <div className="grid grid-cols-[1fr_34px_58px_64px] gap-1 font-bold uppercase">
+                  <div className="grid grid-cols-[1fr_28px_52px_56px] gap-1 font-bold uppercase">
                     <span>Item</span>
                     <span className="text-right">Qty</span>
                     <span className="text-right">Rate</span>
@@ -1535,7 +1655,7 @@ export function CheckoutScreen() {
                   {items.map((item) => (
                     <div key={item.variantId} className="space-y-0.5 py-1">
                       <div className="truncate font-bold">{item.name}</div>
-                      <div className="grid grid-cols-[1fr_34px_58px_64px] gap-1">
+                      <div className="grid grid-cols-[1fr_28px_52px_56px] gap-1">
                         <span>{item.sku}</span>
                         <span className="text-right">{item.qty}</span>
                         <span className="text-right">{formatMoney(item.mrp)}</span>
@@ -1555,12 +1675,16 @@ export function CheckoutScreen() {
                   <div className="space-y-1">
                     <div className="flex justify-between"><span>Gross Amount</span><span>{formatMoney(subtotal)}</span></div>
                     <div className="flex justify-between"><span>Discount</span><span>{formatMoney(discountTotal)}</span></div>
-                    {gstEnabled && <div className="flex justify-between"><span>CGST</span><span>{formatMoney(visibleCgst)}</span></div>}
-                    {gstEnabled && <div className="flex justify-between"><span>SGST</span><span>{formatMoney(visibleSgst)}</span></div>}
+                    {roundOff !== 0n && (
+                      <div className="flex justify-between">
+                        <span>Round Off</span>
+                        <span>{roundOff > 0n ? '+' : ''}{formatMoney(roundOff)}</span>
+                      </div>
+                    )}
                     <div className="border-t border-dashed border-slate-500 pt-2 text-base font-black">
-                      <div className="flex justify-between"><span>NET TOTAL</span><span>{formatMoney(total)}</span></div>
+                      <div className="flex justify-between"><span>NET TOTAL</span><span>{formatMoney(effectiveTotal)}</span></div>
                     </div>
-                    <div className="flex justify-between"><span>{paymentLabel}</span><span>{paymentMode === 'credit' ? formatMoney(total) : formatMoney(paidAmount)}</span></div>
+                    <div className="flex justify-between"><span>{paymentLabel}</span><span>{paymentMode === 'credit' ? formatMoney(effectiveTotal) : formatMoney(paidAmount)}</span></div>
                     {paymentMode !== 'credit' && paymentTender === 'cash' && (
                       <div className="flex justify-between"><span>Change</span><span>Rs {Math.max(0, cashBack).toFixed(2)}</span></div>
                     )}
@@ -1571,7 +1695,6 @@ export function CheckoutScreen() {
                   <div className="text-center">
                     <div>Items: {items.length} | Qty: {items.reduce((sum, item) => sum + item.qty, 0)}</div>
                     <div className="mt-2 font-bold">Thank you. Visit again.</div>
-                    <div className="mt-2 tracking-[0.35em]">|||| ||| |||| ||</div>
                     <div>POS-{invoiceNo}</div>
                   </div>
                 </div>
@@ -1591,7 +1714,7 @@ export function CheckoutScreen() {
                     </div>
                     <div className="rounded border border-slate-200 p-3">
                       <div className="text-[10px] font-bold uppercase text-slate-400">Net</div>
-                      <div className="text-xl font-black text-emerald-700">{formatMoney(total)}</div>
+                      <div className="text-xl font-black text-emerald-700">{formatMoney(effectiveTotal)}</div>
                     </div>
                   </div>
 
@@ -1609,7 +1732,7 @@ export function CheckoutScreen() {
                         onClick={selectCreditMode}
                         className={cn("h-10 rounded text-xs font-black uppercase tracking-wider", paymentMode === 'credit' ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50")}
                       >
-                        Credit / Khata
+                        Credit / Khata <span className={cn("ml-1 text-[10px] font-bold", paymentMode === 'credit' ? "opacity-60" : "opacity-40")}>F4</span>
                       </button>
                     </div>
                     {paymentMode === 'credit' ? (
@@ -1625,6 +1748,7 @@ export function CheckoutScreen() {
                             className={cn("flex h-12 items-center justify-center gap-2 rounded border text-xs font-black uppercase tracking-wider", paymentTender === 'cash' ? "border-amber-500 bg-amber-500 text-white" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50")}
                           >
                             <Banknote size={16} /> Cash
+                            <span className={cn("ml-1 text-[10px] font-bold", paymentTender === 'cash' ? "opacity-60" : "opacity-40")}>F2</span>
                           </button>
                           <button
                             type="button"
@@ -1632,6 +1756,7 @@ export function CheckoutScreen() {
                             className={cn("flex h-12 items-center justify-center gap-2 rounded border text-xs font-black uppercase tracking-wider", paymentTender === 'online' ? "border-blue-600 bg-blue-600 text-white" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50")}
                           >
                             <CreditCard size={16} /> Online
+                            <span className={cn("ml-1 text-[10px] font-bold", paymentTender === 'online' ? "opacity-60" : "opacity-40")}>F3</span>
                           </button>
                         </div>
                         {paymentTender === 'online' ? (
@@ -1664,10 +1789,52 @@ export function CheckoutScreen() {
                   )}>
                     <span className={cn("text-sm font-black uppercase", paymentMode === 'credit' ? "text-slate-700" : paymentTender === 'online' ? "text-blue-700" : cashBack < 0 ? "text-rose-700" : "text-emerald-700")}>{paymentMode === 'credit' ? 'Credit Due' : paymentTender === 'online' ? 'Online Paid' : 'Cash Back'}</span>
                     <span className={cn("text-3xl font-black", paymentMode === 'credit' ? "text-slate-900" : paymentTender === 'online' ? "text-blue-800" : cashBack < 0 ? "text-rose-700" : "text-emerald-700")}>
-                      {paymentMode === 'credit' || paymentTender === 'online' ? formatAmount(total) : cashBack < 0 ? `(${Math.abs(cashBack).toFixed(2)})` : cashBack.toFixed(2)}
+                      {paymentMode === 'credit' || paymentTender === 'online' ? formatAmount(effectiveTotal) : cashBack < 0 ? `(${Math.abs(cashBack).toFixed(2)})` : cashBack.toFixed(2)}
                     </span>
                   </div>
                 </div>
+
+                {/* Quick Items — add chocolates/toffees as change */}
+                {quickItems.length > 0 && paymentMode === 'billing' && (
+                  <div className="rounded-lg border border-violet-200 bg-violet-50 p-3">
+                    <div className="mb-2 text-[10px] font-black uppercase tracking-widest text-violet-500">No Change? Add as Item</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {quickItems.map(item => (
+                        <button
+                          key={item.variant_id}
+                          type="button"
+                          onClick={() => addProduct(item)}
+                          className="rounded border border-violet-300 bg-white px-2 py-1 text-xs font-bold text-violet-800 hover:bg-violet-100 active:scale-95"
+                        >
+                          {item.name} <span className="opacity-60">₹{(Number(item.mrp) / 100).toFixed(0)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Round Off — removes decimal paise */}
+                {paymentMode === 'billing' && Number(total) % 100 !== 0 && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                    <div className="mb-2 text-[10px] font-black uppercase tracking-widest text-amber-600">Round Off</div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setRoundOff(roundOff === -BigInt(Number(total) % 100) ? 0n : -BigInt(Number(total) % 100))}
+                        className={cn("flex-1 rounded border py-2 text-sm font-black", roundOff < 0n ? "border-amber-500 bg-amber-500 text-white" : "border-amber-300 bg-white text-amber-800 hover:bg-amber-100")}
+                      >
+                        ₹{Math.floor(Number(total) / 100)} ↓
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRoundOff(roundOff === BigInt(100 - Number(total) % 100) ? 0n : BigInt(100 - Number(total) % 100))}
+                        className={cn("flex-1 rounded border py-2 text-sm font-black", roundOff > 0n ? "border-amber-500 bg-amber-500 text-white" : "border-amber-300 bg-white text-amber-800 hover:bg-amber-100")}
+                      >
+                        ₹{Math.ceil(Number(total) / 100)} ↑
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="flex gap-3">
                   <button
@@ -1677,6 +1844,16 @@ export function CheckoutScreen() {
                   >
                     Close
                   </button>
+                  {billDate !== null && (
+                    <button
+                      type="button"
+                      onClick={saveOnly}
+                      className="h-14 flex-[2] rounded bg-emerald-500 text-lg font-black uppercase tracking-[0.18em] text-white shadow-lg shadow-emerald-500/20 hover:bg-emerald-600 active:scale-[0.99]"
+                    >
+                      <span className="block leading-none">Save</span>
+                      <span className="block text-[10px] font-bold tracking-widest opacity-70">Ctrl+S</span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={printBill}

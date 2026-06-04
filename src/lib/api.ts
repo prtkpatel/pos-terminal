@@ -6,6 +6,12 @@ const API_CACHE: { baseUrl: string | null; token: string | null; refreshToken: s
   refreshToken: null,
 };
 
+let _onUnauthorized: (() => void) | null = null;
+
+export function setUnauthorizedHandler(fn: () => void) {
+  _onUnauthorized = fn;
+}
+
 export async function loadApiConfig() {
   if (!db) return;
   const row = await db.get("SELECT value FROM settings WHERE key = 'api_base_url'");
@@ -65,6 +71,9 @@ export async function apiFetch(path: string, options: RequestInit = {}) {
       headers['Authorization'] = `Bearer ${getToken()}`;
       return fetch(url, { ...options, headers });
     }
+    // Refresh failed — session is dead, force logout
+    clearTokens();
+    _onUnauthorized?.();
   }
 
   return res;
