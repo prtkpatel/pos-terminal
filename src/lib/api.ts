@@ -15,11 +15,11 @@ export function setUnauthorizedHandler(fn: () => void) {
 export async function loadApiConfig() {
   if (!db) return;
   const row = await db.get("SELECT value FROM settings WHERE key = 'api_base_url'");
-  API_CACHE.baseUrl = row?.value ?? 'http://173.212.230.242:3001';
+  API_CACHE.baseUrl = row?.value ?? 'https://api.subhrajsupermarket.in';
 }
 
 export function getBaseUrl() {
-  return API_CACHE.baseUrl ?? 'http://173.212.230.242:3001';
+  return API_CACHE.baseUrl ?? 'https://api.subhrajsupermarket.in';
 }
 
 export function setTokens(access: string, refresh: string) {

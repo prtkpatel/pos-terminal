@@ -130,9 +130,6 @@ export function CheckoutScreen() {
   const [paymentTender, setPaymentTender] = useState<'cash' | 'online'>('cash');
   const [gstEnabled, setGstEnabled] = useState(true);
   const [storeInfo, setStoreInfo] = useState({ name: '', gstin: '', fssai: '', address: '', phone: '' });
-  const [billDate, setBillDate] = useState<string | null>(null);
-  const [roundOff, setRoundOff] = useState<bigint>(0n);
-  const [quickItems, setQuickItems] = useState<Product[]>([]);
   const [showPayModal, setShowPayModal] = useState(false);
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [customerName, setCustomerName] = useState('');

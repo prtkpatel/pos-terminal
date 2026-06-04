@@ -209,7 +209,7 @@ async function initDb() {
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `);
   [
-    ['api_base_url', 'http://173.212.230.242:3001'],
+    ['api_base_url', 'https://api.subhrajsupermarket.in'],
     ['terminal_id', '11111111-1111-1111-1111-111111111111'],
     ['store_id', '33333333-3333-3333-3333-333333333333'],
     ['shift_id', '22222222-2222-2222-2222-222222222222'],
