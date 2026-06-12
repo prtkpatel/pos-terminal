@@ -6,8 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "dist": "npm run build && electron-builder --win portable --publish never",
-    "dist:dir": "npm run build && electron-builder --win dir --publish never",
+    "obfuscate": "node scripts/obfuscate-renderer.cjs",
+    "bytecode": "node scripts/run-bytecode.cjs",
+    "harden": "npm run obfuscate && npm run bytecode",
+    "dist": "npm run build && npm run harden && electron-builder --win portable --publish never",
+    "dist:dir": "npm run build && npm run harden && electron-builder --win dir --publish never",
+    "dist:debug": "npm run build && electron-builder --win dir --publish never",
     "typecheck": "npx tsc --noEmit",
     "preview": "vite preview",
     "test": "vitest run",
@@ -30,10 +34,10 @@
     ],
     "asar": true,
     "asarUnpack": [
-      "node_modules/better-sqlite3/**/*"
+      "node_modules/better-sqlite3-multiple-ciphers/**/*"
     ],
     "win": {
-      "signAndEditExecutable": false,
+      "signAndEditExecutable": true,
       "verifyUpdateCodeSignature": false,
       "target": [
         {
@@ -51,7 +55,10 @@
   },
   "dependencies": {
     "@pos/shared-types": "file:../pos-shared-types",
+    "bcryptjs": "^2.4.3",
     "better-sqlite3": "^9.4.3",
+    "better-sqlite3-multiple-ciphers": "^12.10.0",
+    "bytenode": "^1.5.7",
     "clsx": "^2.1.0",
     "date-fns": "^3.6.0",
     "lucide-react": "^0.363.0",
@@ -66,6 +73,7 @@
     "@playwright/test": "^1.60.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
+    "@types/bcryptjs": "^2.4.6",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@types/uuid": "^10.0.0",
@@ -76,6 +84,7 @@
     "electron": "^29.1.6",
     "electron-builder": "^24.13.3",
     "electron-rebuild": "^3.2.9",
+    "javascript-obfuscator": "^5.4.3",
     "jsdom": "^29.1.1",
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.3",
@@ -83,6 +92,7 @@
     "vite": "^5.2.0",
     "vite-plugin-electron": "^0.28.4",
     "vite-plugin-electron-renderer": "^0.14.5",
+    "vite-plugin-javascript-obfuscator": "^3.1.0",
     "vitest": "^4.1.5"
   }
 }

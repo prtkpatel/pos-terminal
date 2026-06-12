@@ -1,7 +1,22 @@
 import { create } from 'zustand';
+import bcrypt from 'bcryptjs';
 import { db } from '../lib/db';
 import { apiPinLogin, setTokens, clearTokens, getToken, getRefreshToken, loadApiConfig, setUnauthorizedHandler, apiFetch } from '../lib/api';
 import { isOnline } from '../lib/syncEngine';
+
+// Cashier PINs are stored HASHED in the local cashiers table (offline-login cache).
+// Legacy rows may still be plaintext — verifyPin handles both and callers upgrade on match.
+function isBcryptHash(value: string): boolean {
+  return typeof value === 'string' && /^\$2[aby]\$/.test(value);
+}
+function hashPin(pin: string): string {
+  return bcrypt.hashSync(pin, 10);
+}
+function verifyPin(pin: string, stored: string | null | undefined): boolean {
+  if (!stored) return false;
+  if (isBcryptHash(stored)) return bcrypt.compareSync(pin, stored);
+  return pin === stored; // legacy plaintext row
+}
 
 export interface Cashier {
   id: string;
@@ -51,10 +66,11 @@ export const useAuthStore = create<AuthState>((set, get) => {
         if (db) {
           try {
             const existing = await db.get('SELECT id FROM cashiers WHERE username = ?', [normalizedUser]);
+            const pinHash = hashPin(pin.trim());
             if (existing) {
-              await db.execute('UPDATE cashiers SET id = ?, name = ?, pin = ? WHERE username = ?', [data.user.id, data.user.name, pin.trim(), normalizedUser]);
+              await db.execute('UPDATE cashiers SET id = ?, name = ?, pin = ? WHERE username = ?', [data.user.id, data.user.name, pinHash, normalizedUser]);
             } else {
-              await db.execute('INSERT INTO cashiers (id, username, name, pin) VALUES (?, ?, ?, ?)', [data.user.id, normalizedUser, data.user.name, pin.trim()]);
+              await db.execute('INSERT INTO cashiers (id, username, name, pin) VALUES (?, ?, ?, ?)', [data.user.id, normalizedUser, data.user.name, pinHash]);
             }
           } catch {
             // non-fatal: offline credential cache update failed
@@ -75,11 +91,15 @@ export const useAuthStore = create<AuthState>((set, get) => {
       return { success: false, message: 'Database not available' };
     }
     const row = await db.get(
-      'SELECT id, username, name FROM cashiers WHERE username = ? AND pin = ?',
-      [normalizedUser, pin.trim()]
+      'SELECT id, username, name, pin FROM cashiers WHERE username = ?',
+      [normalizedUser]
     );
-    if (!row) {
+    if (!row || !verifyPin(pin.trim(), row.pin)) {
       return { success: false, message: 'Invalid username or PIN' };
+    }
+    // Upgrade a legacy plaintext PIN to a hash on first successful offline login.
+    if (!isBcryptHash(row.pin)) {
+      try { await db.execute('UPDATE cashiers SET pin = ? WHERE username = ?', [hashPin(pin.trim()), normalizedUser]); } catch { /* non-fatal */ }
     }
     const cashier = { id: row.id, username: row.username, name: row.name };
     localStorage.setItem('pos_cashier', JSON.stringify(cashier));

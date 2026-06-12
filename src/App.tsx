@@ -5,7 +5,7 @@ import { CheckoutScreen } from './pages/CheckoutScreen';
 import { LoginScreen } from './pages/LoginScreen';
 import { useAuthStore } from './stores/authStore';
 import { useSyncStore } from './stores/syncStore';
-import { loadApiConfig } from './lib/api';
+import { loadApiConfig, initSecureTokens } from './lib/api';
 
 // Chromium's :focus CSS pseudo-class stops updating after window.confirm() /
 // window.alert() in Electron until the OS gives the window focus back.
@@ -43,17 +43,22 @@ export default function App() {
   const { syncNow, refreshOutboxDepth } = useSyncStore();
 
   useEffect(() => {
-    void restoreSession();
-    void loadApiConfig();
+    // Load API config + hydrate tokens from OS-encrypted storage BEFORE restoring the
+    // session, so getToken()/getRefreshToken() see the persisted values.
+    void (async () => {
+      await loadApiConfig();
+      await initSecureTokens();
+      await restoreSession();
+    })();
   }, [restoreSession]);
 
-  // Periodic sync every 30 seconds when logged in
+  // Periodic sync every 15 seconds when logged in
   useEffect(() => {
     if (!cashier) return;
     const timer = window.setInterval(() => {
       void syncNow();
       void refreshOutboxDepth();
-    }, 30000);
+    }, 15000);
     // Sync immediately on login
     void syncNow();
     void refreshOutboxDepth();

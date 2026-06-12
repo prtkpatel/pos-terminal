@@ -15,39 +15,73 @@ export function setUnauthorizedHandler(fn: () => void) {
 export async function loadApiConfig() {
   if (!db) return;
   const row = await db.get("SELECT value FROM settings WHERE key = 'api_base_url'");
-  API_CACHE.baseUrl = row?.value ?? 'http://localhost:3000';
+  API_CACHE.baseUrl = row?.value ?? 'https://api.subhrajsupermarket.in';
 }
 
 export function getBaseUrl() {
   return API_CACHE.baseUrl ?? 'https://api.subhrajsupermarket.in';
 }
 
+// OS-encrypted secret store exposed by the preload (safeStorage). Null in pure
+// browser/preview mode — then tokens live in memory for the session only (never
+// persisted in plaintext).
+function secureStore(): { get: (k: string) => Promise<string | null>; set: (k: string, v: string) => Promise<boolean>; delete: (k: string) => Promise<boolean> } | null {
+  return (window as any).api?.secure ?? null;
+}
+
+const ACCESS_KEY = 'pos_access_token';
+const REFRESH_KEY = 'pos_refresh_token';
+
 export function setTokens(access: string, refresh: string) {
   API_CACHE.token = access;
   API_CACHE.refreshToken = refresh;
-  localStorage.setItem('pos_access_token', access);
-  localStorage.setItem('pos_refresh_token', refresh);
+  const store = secureStore();
+  if (store) {
+    void store.set(ACCESS_KEY, access);
+    void store.set(REFRESH_KEY, refresh);
+  }
 }
 
+// Synchronous read from the in-memory cache. The cache is hydrated once at startup
+// by initSecureTokens() (and kept current by setTokens), so this stays sync for apiFetch.
 export function getToken() {
-  if (!API_CACHE.token) {
-    API_CACHE.token = localStorage.getItem('pos_access_token');
-  }
   return API_CACHE.token;
 }
 
 export function getRefreshToken() {
-  if (!API_CACHE.refreshToken) {
-    API_CACHE.refreshToken = localStorage.getItem('pos_refresh_token');
-  }
   return API_CACHE.refreshToken;
 }
 
 export function clearTokens() {
   API_CACHE.token = null;
   API_CACHE.refreshToken = null;
-  localStorage.removeItem('pos_access_token');
-  localStorage.removeItem('pos_refresh_token');
+  const store = secureStore();
+  if (store) {
+    void store.delete(ACCESS_KEY);
+    void store.delete(REFRESH_KEY);
+  }
+}
+
+// Hydrate tokens from OS-encrypted storage at app startup. Migrates any legacy
+// localStorage tokens into safeStorage once, then purges them.
+export async function initSecureTokens() {
+  const store = secureStore();
+  if (!store) return;
+  try {
+    API_CACHE.token = (await store.get(ACCESS_KEY)) || null;
+    API_CACHE.refreshToken = (await store.get(REFRESH_KEY)) || null;
+  } catch {
+    // ignore — fall through to legacy migration / fresh login
+  }
+  if (!API_CACHE.token) {
+    const legacyAccess = localStorage.getItem(ACCESS_KEY);
+    const legacyRefresh = localStorage.getItem(REFRESH_KEY);
+    if (legacyAccess) {
+      setTokens(legacyAccess, legacyRefresh || '');
+      localStorage.removeItem(ACCESS_KEY);
+      localStorage.removeItem(REFRESH_KEY);
+    }
+  }
 }
 
 export async function apiFetch(path: string, options: RequestInit = {}) {

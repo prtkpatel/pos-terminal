@@ -14,7 +14,7 @@ import {
   ChevronRight,
   UserPlus
 } from 'lucide-react';
-import { Customer, Product, useCartStore } from '../stores/cartStore';
+import { Customer, Product, useCartStore, parseScaleBarcode } from '../stores/cartStore';
 import { useAuthStore } from '../stores/authStore';
 import { useSyncStore } from '../stores/syncStore';
 import { cn } from '../lib/utils';
@@ -110,7 +110,7 @@ async function cacheCustomer(customer: { id?: string; name?: string; phone?: str
 }
 
 export function CheckoutScreen() {
-  const { items, customer, subtotal, taxTotal, orderDiscount, total, addItem, addProduct, searchProducts, updateQty, removeItem, clearCart, replaceCart, setCustomer, saveBill, loadBill, getMaxInvoiceNo } = useCartStore();
+  const { items, customer, subtotal, taxTotal, orderDiscount, total, addNotice, clearAddNotice, addItem, addProduct, addWeighedByPlu, searchProducts, updateQty, removeItem, clearCart, replaceCart, setCustomer, saveBill, loadBill, getMaxInvoiceNo } = useCartStore();
   const { cashier, logout } = useAuthStore();
   const { isOnline, isSyncing, lastSyncAt, outboxDepth, failedCount, syncError, syncNow, refreshOutboxDepth } = useSyncStore();
   const [barcodeInput, setBarcodeInput] = useState('');
@@ -129,7 +129,7 @@ export function CheckoutScreen() {
   const [paymentMode, setPaymentMode] = useState<'billing' | 'credit'>('billing');
   const [paymentTender, setPaymentTender] = useState<'cash' | 'online'>('cash');
   const [gstEnabled, setGstEnabled] = useState(true);
-  const [storeInfo, setStoreInfo] = useState({ name: '', gstin: '', fssai: '', address: '', phone: '' });
+  const [storeInfo, setStoreInfo] = useState({ name: '', gstin: '', fssai: '', address: '', phone: '', footer: '' });
   const [billDate, setBillDate] = useState<string | null>(null);
   const [roundOff, setRoundOff] = useState<bigint>(0n);
   const [quickItems, setQuickItems] = useState<Product[]>([]);
@@ -175,10 +175,10 @@ export function CheckoutScreen() {
       if (!db) return;
       const row = await db.get("SELECT value FROM settings WHERE key = 'gst_enabled'");
       if (mounted) setGstEnabled(row?.value !== 'false');
-      const rows = await db.query("SELECT key, value FROM settings WHERE key IN ('store_name','store_gstin','store_fssai','store_address','store_phone')");
+      const rows = await db.query("SELECT key, value FROM settings WHERE key IN ('store_name','store_gstin','store_fssai','store_address','store_phone','store_footer')");
       const map: Record<string, string> = {};
       for (const r of rows) map[r.key] = r.value ?? '';
-      if (mounted) setStoreInfo({ name: map.store_name || '', gstin: map.store_gstin || '', fssai: map.store_fssai || '', address: map.store_address || '', phone: map.store_phone || '' });
+      if (mounted) setStoreInfo({ name: map.store_name || '', gstin: map.store_gstin || '', fssai: map.store_fssai || '', address: map.store_address || '', phone: map.store_phone || '', footer: map.store_footer || '' });
     };
     void loadGstEnabled().catch(() => undefined);
 
@@ -364,6 +364,18 @@ export function CheckoutScreen() {
   const scanTerm = async (rawTerm: string) => {
     const term = rawTerm.trim();
     if (!term) return;
+
+    // Weighing-scale barcode (prefix 21 + PLU + weight)? Resolve PLU → product and
+    // add the embedded weight as the line quantity, before the normal barcode search.
+    const scale = parseScaleBarcode(term);
+    if (scale) {
+      await addWeighedByPlu(scale.plu, scale.weightKg);
+      setSelectedVariantId('');
+      setBarcodeInput('');
+      setProductSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
 
     const matches = await searchProducts(term, 10);
     const exactMatch = matches.find((product) =>
@@ -1152,8 +1164,23 @@ export function CheckoutScreen() {
     return () => window.removeEventListener('keydown', handleShortcut);
   }, [showPayModal, showCustomerModal, showProductFinder, showCameraScanner, items, barcodeInput]);
 
+  // Auto-dismiss the add-to-cart expiry notice after a few seconds.
+  useEffect(() => {
+    if (!addNotice) return;
+    const timer = window.setTimeout(() => clearAddNotice(), addNotice.type === 'error' ? 6000 : 4000);
+    return () => window.clearTimeout(timer);
+  }, [addNotice, clearAddNotice]);
+
   return (
     <div className="flex h-full w-full flex-col bg-slate-50 overflow-hidden select-none">
+      {addNotice ? (
+        <div className="pointer-events-none fixed inset-x-0 top-3 z-[60] flex justify-center px-4">
+          <div className={`pointer-events-auto flex items-center gap-3 rounded-lg px-4 py-3 shadow-xl ring-1 ${addNotice.type === 'error' ? 'bg-rose-600 text-white ring-rose-700' : 'bg-amber-500 text-white ring-amber-600'}`}>
+            <span className="text-sm font-bold">{addNotice.type === 'error' ? '⛔' : '⚠'} {addNotice.message}</span>
+            <button onClick={clearAddNotice} className="rounded px-2 py-0.5 text-xs font-bold uppercase tracking-wide hover:bg-black/10">Dismiss</button>
+          </div>
+        </div>
+      ) : null}
       {/* 1. TOUCH-FIRST COMMAND + SEARCH AREA */}
       <div className="border-b bg-white shadow-sm">
         <div className="grid min-h-[112px] grid-cols-[270px_minmax(360px,1fr)_500px] gap-4 px-4 py-3">
@@ -1325,7 +1352,14 @@ export function CheckoutScreen() {
                             highlightedSuggestionIdx === index && "bg-blue-100"
                           )}
                         >
-                          <td className="max-w-[250px] truncate border-b px-2 py-2 font-black text-slate-900">{product.name}</td>
+                          <td className="max-w-[250px] border-b px-2 py-2 font-black text-slate-900">
+                            <div className="flex items-center gap-2">
+                              {product.image_thumb ? (
+                                <img src={product.image_thumb} alt="" className="h-8 w-8 shrink-0 rounded border border-slate-200 object-contain" />
+                              ) : null}
+                              <span className="truncate">{product.name}</span>
+                            </div>
+                          </td>
                           <td className="whitespace-nowrap border-b px-2 py-2 font-bold text-slate-600">{product.sku}</td>
                           <td className="border-b px-2 py-2 font-bold text-slate-500">{product.barcode}</td>
                           <td className="border-b px-2 py-2 text-right font-bold text-slate-500">{formatAmount(product.mrp)}</td>
@@ -1697,7 +1731,7 @@ export function CheckoutScreen() {
 
                   <div className="text-center">
                     <div>Items: {items.length} | Qty: {items.reduce((sum, item) => sum + item.qty, 0)}</div>
-                    <div className="mt-2 font-bold">Thank you. Visit again.</div>
+                    <div className="mt-2 whitespace-pre-line font-bold">{storeInfo.footer || 'Thank you. Visit again.'}</div>
                     <div>POS-{invoiceNo}</div>
                   </div>
                 </div>
@@ -1993,7 +2027,14 @@ export function CheckoutScreen() {
                 <tbody>
                   {finderProducts.map((product) => (
                     <tr key={product.variant_id} className="hover:bg-blue-50">
-                      <td className="border-b px-3 py-2 font-bold text-slate-900">{product.name}</td>
+                      <td className="border-b px-3 py-2 font-bold text-slate-900">
+                        <div className="flex items-center gap-2">
+                          {product.image_thumb ? (
+                            <img src={product.image_thumb} alt="" className="h-9 w-9 shrink-0 rounded border border-slate-200 object-contain" />
+                          ) : null}
+                          <span>{product.name}</span>
+                        </div>
+                      </td>
                       <td className="border-b px-3 py-2 font-medium text-slate-600">{product.sku}</td>
                       <td className="border-b px-3 py-2 font-medium text-slate-600">{product.barcode}</td>
                       <td className="border-b px-3 py-2 text-right font-medium text-slate-500">{formatMoney(product.mrp)}</td>

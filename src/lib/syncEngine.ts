@@ -115,11 +115,28 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
   if (!db) return { products: 0, customers: 0 };
   await loadApiConfig();
 
+  // One-time self-heal: older builds could persist a LOCAL-time sync watermark, which the
+  // server parses as a FUTURE instant → every delta comes back empty → updates (new barcodes,
+  // edited products) never reach the till. Clear the watermarks once so the next pull is a
+  // full re-sync; from then on we only ever store the server's UTC `serverNow`. Gated by a
+  // flag so it runs a single time per install. (Does NOT touch the outbox — offline bills
+  // are preserved.)
+  const healed = await getSetting('sync_tz_heal_v1');
+  if (healed !== 'done') {
+    try { await db.execute('DELETE FROM sync_state', []); } catch { /* table may be empty */ }
+    await setSetting('sync_tz_heal_v1', 'done');
+  }
+
   const since: Record<string, string> = {};
   const entities = ['products', 'categories', 'customers', 'inventory', 'rules'];
   for (const entity of entities) {
     const ts = await getSyncState(entity);
-    if (ts) since[entity] = ts;
+    // Defensive: ignore an unparseable or far-future watermark (treat as a full pull) so a
+    // bad value can never permanently hide updates. Date.now() is UTC epoch (tz-independent).
+    if (ts) {
+      const t = new Date(ts).getTime();
+      if (!Number.isNaN(t) && t <= Date.now() + 120000) since[entity] = ts;
+    }
   }
 
   const tid = await getTerminalId();
@@ -132,11 +149,18 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
   if (result.products?.length) {
     for (const p of result.products) {
       const variant = p.variants?.[0];
-      const barcode = normalizeBarcode(variant?.barcodes?.[0]?.barcode ?? '');
+      // Prefer the PRIMARY barcode — it's the one the admin label printer prints, so it must
+      // be the one we match scans against. Fall back to the first barcode if none is flagged.
+      const primaryBarcode =
+        variant?.barcodes?.find((b: any) => b.isPrimary)?.barcode ?? variant?.barcodes?.[0]?.barcode ?? '';
+      const barcode = normalizeBarcode(primaryBarcode);
       try {
+        // PLU (scale code) for weighed items — stored in the product's attributes JSON.
+        const pluRaw = (p.attributes && (p.attributes.plu ?? p.attributes.PLU)) ?? null;
+        const plu = pluRaw == null || pluRaw === '' ? null : String(pluRaw).replace(/^0+/, '') || '0';
         await db.execute(
-          `INSERT OR REPLACE INTO products (id, variant_id, sku, barcode, name, hsn, mrp, price, discount, tax_rate, quantity, reorder_level, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT quantity FROM products WHERE variant_id = ?), (SELECT reorder_level FROM products WHERE variant_id = ?), CURRENT_TIMESTAMP)`,
+          `INSERT OR REPLACE INTO products (id, variant_id, sku, barcode, name, hsn, mrp, price, discount, tax_rate, quantity, reorder_level, expiry_date, plu, image_thumb, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT quantity FROM products WHERE variant_id = ?), (SELECT reorder_level FROM products WHERE variant_id = ?), ?, ?, ?, CURRENT_TIMESTAMP)`,
           [
             p.id,
             variant?.id ?? p.id,
@@ -150,6 +174,9 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
             Number(p.taxRate) || 0,
             variant?.id ?? p.id,
             variant?.id ?? p.id,
+            p.nearestExpiry ?? null,
+            plu,
+            variant?.imageThumb ?? null,
           ]
         );
         productsCount++;
@@ -202,11 +229,16 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
     await setSyncState('customers', result.serverNow);
   }
 
-  if (result.categories?.length) await setSyncState('categories', result.serverNow);
-  if (result.rules?.length) await setSyncState('rules', result.serverNow);
   if (result.settings) {
     await setSetting('gst_enabled', result.settings.gstEnabled === false ? 'false' : 'true');
-    await setSyncState('settings', result.serverNow);
+  }
+
+  // Always advance every watermark to the server clock — even on an empty delta — so a
+  // transient empty pull can never leave a stale watermark that deadlocks future syncs.
+  if (result.serverNow) {
+    for (const entity of ['products', 'categories', 'customers', 'inventory', 'rules', 'settings']) {
+      await setSyncState(entity, result.serverNow);
+    }
   }
 
   return { products: productsCount, customers: customersCount };
@@ -219,6 +251,9 @@ export async function refreshTerminalSettings(): Promise<{ gstEnabled: boolean }
     const settings = await apiGetSettings();
     const gstEnabled = settings?.tenant?.settings?.gstEnabled !== false;
     await setSetting('gst_enabled', gstEnabled ? 'true' : 'false');
+
+    // Receipt footer is tenant-level (edited in admin → Settings → Receipt Defaults).
+    await setSetting('store_footer', settings?.tenant?.settings?.receiptFooter || '');
 
     // Cache this terminal's store header (name / GSTIN / FSSAI / address) for the printed bill.
     const stores: any[] = settings?.stores || [];

@@ -1,12 +1,1 @@
-"use strict";
-const electron = require("electron");
-electron.contextBridge.exposeInMainWorld("api", {
-  db: {
-    query: (sql, params) => electron.ipcRenderer.invoke("db:query", sql, params),
-    get: (sql, params) => electron.ipcRenderer.invoke("db:get", sql, params),
-    execute: (sql, params) => electron.ipcRenderer.invoke("db:execute", sql, params)
-  },
-  sys: {
-    getPath: (name) => electron.ipcRenderer.invoke("sys:get-path", name)
-  }
-});
+"use strict";const r=require("electron");r.contextBridge.exposeInMainWorld("api",{db:{query:(e,i)=>r.ipcRenderer.invoke("db:query",e,i),get:(e,i)=>r.ipcRenderer.invoke("db:get",e,i),execute:(e,i)=>r.ipcRenderer.invoke("db:execute",e,i)},sys:{getPath:e=>r.ipcRenderer.invoke("sys:get-path",e)},secure:{get:e=>r.ipcRenderer.invoke("secure:get",e),set:(e,i)=>r.ipcRenderer.invoke("secure:set",e,i),delete:e=>r.ipcRenderer.invoke("secure:delete",e)},print:{silent:e=>r.ipcRenderer.invoke("print:silent",e),getPrinters:()=>r.ipcRenderer.invoke("print:get-printers")}});

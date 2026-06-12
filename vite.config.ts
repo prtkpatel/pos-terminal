@@ -4,6 +4,9 @@ import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import path from 'path';
 
+// Renderer obfuscation runs as a POST-BUILD step (scripts/obfuscate-renderer.cjs) on the
+// final bundle — doing it here as a per-module transform gets undone by esbuild's minify.
+// Main + preload get stronger V8 bytecode protection via scripts/bytecode.cjs.
 export default defineConfig({
   plugins: [
     react(),
@@ -14,7 +17,7 @@ export default defineConfig({
         vite: {
           build: {
             rollupOptions: {
-              external: ['better-sqlite3'],
+              external: ['better-sqlite3-multiple-ciphers'],
             },
           },
         },
@@ -26,6 +29,10 @@ export default defineConfig({
     ]),
     renderer(),
   ],
+  build: {
+    // No sourcemaps in production — don't ship a map that de-obfuscates the bundle.
+    sourcemap: false,
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

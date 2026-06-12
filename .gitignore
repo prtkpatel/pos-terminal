@@ -24,3 +24,17 @@ yarn-error.log*
 .vscode/
 .idea/
 .DS_Store
+
+# Packaged installers / bytecode
+release/
+*.jsc
+
+# Local SQLite database (encrypted runtime data — never commit)
+pos.db
+pos.db-*
+pos.db.enc
+
+# Test / e2e output
+test-results/
+playwright-report/
+e2e/screenshots/

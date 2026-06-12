@@ -29,6 +29,54 @@ export interface Product {
   tax_rate: number;
   quantity: number;
   reorder_level: number;
+  expiry_date?: string | null;
+  plu?: string | null;
+  image_thumb?: string | null;
+}
+
+// Weighing-scale barcode format (confirmed with the scale vendor): a 13-digit Code-128
+// payload laid out as  prefix(2) + PLU(5) + weight(5) + check(1), weight in grams.
+//   e.g. 2100420013342 → prefix 21, PLU 00420 (=420), weight 01334 (=1.334 kg), check 2
+// Configurable here if a different scale/format is used.
+export const SCALE_BARCODE_CONFIG = {
+  prefix: '21',
+  pluLength: 5,
+  valueLength: 5,
+  valueDecimals: 3, // 01334 → 1.334
+};
+
+/** Parse a weighing-scale barcode into { plu, weightKg }, or null if it isn't one. */
+export function parseScaleBarcode(code: string, cfg = SCALE_BARCODE_CONFIG): { plu: string; weightKg: number } | null {
+  const c = String(code || '').trim();
+  const total = cfg.prefix.length + cfg.pluLength + cfg.valueLength + 1; // +1 check digit
+  if (c.length !== total || !/^\d+$/.test(c) || !c.startsWith(cfg.prefix)) return null;
+  const pluStart = cfg.prefix.length;
+  const pluStr = c.slice(pluStart, pluStart + cfg.pluLength);
+  const valStr = c.slice(pluStart + cfg.pluLength, pluStart + cfg.pluLength + cfg.valueLength);
+  const plu = String(parseInt(pluStr, 10)); // '00420' → '420'
+  const weightKg = parseInt(valStr, 10) / Math.pow(10, cfg.valueDecimals); // '01334' → 1.334
+  if (Number.isNaN(weightKg) || Number.isNaN(parseInt(pluStr, 10))) return null;
+  return { plu, weightKg };
+}
+
+export type ExpiryInfo = { status: 'ok' | 'near' | 'expired'; days: number | null };
+
+/** Days until the nearest in-stock batch expires; status block(expired)/warn(near). */
+export function getExpiryInfo(expiry?: string | null, warnDays = 30): ExpiryInfo {
+  if (!expiry) return { status: 'ok', days: null };
+  const date = new Date(expiry);
+  if (Number.isNaN(date.getTime())) return { status: 'ok', days: null };
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.floor((date.getTime() - today.getTime()) / 86_400_000);
+  if (days < 0) return { status: 'expired', days };
+  if (days <= warnDays) return { status: 'near', days };
+  return { status: 'ok', days };
+}
+
+export interface AddNotice {
+  type: 'error' | 'warn';
+  message: string;
 }
 
 export interface Customer {
@@ -44,8 +92,11 @@ interface CartState {
   taxTotal: bigint;
   orderDiscount: bigint;
   total: bigint;
+  addNotice: AddNotice | null;
+  clearAddNotice: () => void;
   addItem: (searchTerm: string) => Promise<boolean>;
-  addProduct: (product: Product) => void;
+  addProduct: (product: Product) => boolean;
+  addWeighedByPlu: (plu: string, weightKg: number) => Promise<boolean>;
   searchProducts: (searchTerm: string, limit?: number) => Promise<Product[]>;
   removeItem: (variantId: string) => void;
   updateQty: (variantId: string, qty: number) => void;
@@ -65,6 +116,9 @@ export const useCartStore = create<CartState>((set, get) => ({
   taxTotal: 0n,
   orderDiscount: 0n,
   total: 0n,
+  addNotice: null,
+
+  clearAddNotice: () => set({ addNotice: null }),
 
   addItem: async (searchTerm: string) => {
     if (!db) {
@@ -79,11 +133,22 @@ export const useCartStore = create<CartState>((set, get) => ({
       return false;
     }
 
-    get().addProduct(product);
-    return true;
+    return get().addProduct(product);
   },
 
   addProduct: (product: Product) => {
+    // Expiry guard: block expired stock at billing, warn when near expiry.
+    const expiry = getExpiryInfo(product.expiry_date);
+    if (expiry.status === 'expired') {
+      set({
+        addNotice: {
+          type: 'error',
+          message: `${product.name} is EXPIRED (${Math.abs(expiry.days ?? 0)} day(s) ago) — cannot be billed. Remove from shelf.`,
+        },
+      });
+      return false;
+    }
+
     const items = [...get().items];
     const existingIndex = items.findIndex(i => i.variantId === product.variant_id);
 
@@ -110,8 +175,83 @@ export const useCartStore = create<CartState>((set, get) => ({
     }
 
     const { subtotal, taxTotal, total } = calculateTotals(items);
-    set({ items, subtotal, taxTotal, orderDiscount: 0n, total });
+    set({
+      items,
+      subtotal,
+      taxTotal,
+      orderDiscount: 0n,
+      total,
+      addNotice: expiry.status === 'near'
+        ? { type: 'warn', message: `${product.name} expires in ${expiry.days} day(s) — sell first / check stock.` }
+        : null,
+    });
     get().refreshPricing();
+    return true;
+  },
+
+  addWeighedByPlu: async (plu: string, weightKg: number) => {
+    if (!db) return false;
+    const rows = await db.query('SELECT * FROM products WHERE plu = ? LIMIT 1', [plu]);
+    const product = rows[0] as Product | undefined;
+    if (!product) {
+      set({ addNotice: { type: 'error', message: `Scale item PLU ${plu} not found — add it in the admin panel, then sync.` } });
+      return true; // handled — don't fall through to a normal (failing) barcode search
+    }
+    if (!(weightKg > 0)) {
+      set({ addNotice: { type: 'error', message: `Could not read a valid weight for ${product.name}.` } });
+      return true;
+    }
+    const expiry = getExpiryInfo(product.expiry_date);
+    if (expiry.status === 'expired') {
+      set({ addNotice: { type: 'error', message: `${product.name} is EXPIRED (${Math.abs(expiry.days ?? 0)} day(s) ago) — cannot be billed.` } });
+      return true;
+    }
+
+    const items = [...get().items];
+    const price = BigInt(product.price);
+    const mrp = BigInt(product.mrp);
+    const unitDiscount = mrp > price ? mrp - price : 0n;
+    const existingIndex = items.findIndex((i) => i.variantId === product.variant_id);
+
+    if (existingIndex > -1) {
+      // Same weighed item scanned again — accumulate the weight onto the line.
+      const item = items[existingIndex]!;
+      const newQty = item.qty + weightKg;
+      const qf = BigInt(Math.round(newQty * 1000));
+      item.qty = newQty;
+      item.lineTotal = (qf * BigInt(item.price)) / 1000n;
+      item.lineDiscount = (qf * (BigInt(item.mrp) > BigInt(item.price) ? BigInt(item.mrp) - BigInt(item.price) : 0n)) / 1000n;
+    } else {
+      const qf = BigInt(Math.round(weightKg * 1000));
+      items.push({
+        id: product.id,
+        variantId: product.variant_id,
+        sku: product.sku,
+        barcode: product.barcode,
+        name: product.name,
+        qty: weightKg,
+        mrp,
+        price,
+        lineDiscount: (qf * unitDiscount) / 1000n,
+        taxRate: product.tax_rate,
+        lineTotal: (qf * price) / 1000n,
+        appliedRules: [],
+      });
+    }
+
+    const { subtotal, taxTotal, total } = calculateTotals(items);
+    set({
+      items,
+      subtotal,
+      taxTotal,
+      orderDiscount: 0n,
+      total,
+      addNotice: expiry.status === 'near'
+        ? { type: 'warn', message: `${product.name} expires in ${expiry.days} day(s) — sell first.` }
+        : null,
+    });
+    get().refreshPricing();
+    return true;
   },
 
   searchProducts: async (searchTerm: string, limit = 25) => {

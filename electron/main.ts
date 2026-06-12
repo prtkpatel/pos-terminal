@@ -1,5 +1,7 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
 import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
 
 app.commandLine.appendSwitch('enable-experimental-web-platform-features');
 app.commandLine.appendSwitch('enable-features', 'BarcodeDetector');
@@ -7,15 +9,126 @@ app.commandLine.appendSwitch('enable-features', 'BarcodeDetector');
 let mainWindow: BrowserWindow | null = null;
 let db: any = null;
 
+// ── OS-encrypted secret store ────────────────────────────────────────────────
+// Secrets (auth tokens, the SQLite encryption key) are sealed with Electron
+// safeStorage (Windows DPAPI / macOS Keychain / libsecret) and persisted to a
+// file in userData. They never touch localStorage or the plaintext disk.
+function secureStorePath(): string {
+  return path.join(app.getPath('userData'), 'secure-store.json');
+}
+function readSecureStore(): Record<string, string> {
+  try {
+    return JSON.parse(fs.readFileSync(secureStorePath(), 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+function writeSecureStore(map: Record<string, string>): void {
+  try {
+    fs.writeFileSync(secureStorePath(), JSON.stringify(map), { mode: 0o600 });
+  } catch (e) {
+    console.warn('[secure] write failed:', e);
+  }
+}
+function secureSet(key: string, value: string): void {
+  const map = readSecureStore();
+  if (safeStorage.isEncryptionAvailable()) {
+    map[key] = safeStorage.encryptString(value).toString('base64');
+  } else {
+    // Fallback (e.g. Linux with no keyring): obfuscated, not encrypted. Logged loudly.
+    console.warn('[secure] OS encryption unavailable — storing obfuscated only');
+    map[key] = 'plain:' + Buffer.from(value, 'utf8').toString('base64');
+  }
+  writeSecureStore(map);
+}
+function secureGet(key: string): string | null {
+  const stored = readSecureStore()[key];
+  if (!stored) return null;
+  try {
+    if (stored.startsWith('plain:')) return Buffer.from(stored.slice(6), 'base64').toString('utf8');
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    return safeStorage.decryptString(Buffer.from(stored, 'base64'));
+  } catch {
+    return null;
+  }
+}
+function secureDelete(key: string): void {
+  const map = readSecureStore();
+  delete map[key];
+  writeSecureStore(map);
+}
+
+// Random per-install SQLite encryption key, sealed at rest by safeStorage.
+function getOrCreateDbKey(): string {
+  let key = secureGet('db_key');
+  if (!key) {
+    key = crypto.randomBytes(32).toString('base64');
+    secureSet('db_key', key);
+  }
+  return key;
+}
+
+// Open the SQLCipher DB, migrating a legacy plaintext pos.db on first encrypted run.
+function openEncryptedDb(Database: any, dbPath: string, dbKey: string): any {
+  // Open with the key and confirm it's readable. Always closes its own handle on
+  // failure so a blocked file doesn't break the migration / fresh-start fallback.
+  const open = (): any => {
+    const d = new Database(dbPath);
+    try {
+      d.pragma(`cipher='sqlcipher'`);
+      d.pragma(`key='${dbKey}'`);
+      d.exec('SELECT count(*) FROM sqlite_master'); // throws if key is wrong / file plaintext
+      return d;
+    } catch (err) {
+      try { d.close(); } catch { /* ignore */ }
+      throw err;
+    }
+  };
+
+  const existed = fs.existsSync(dbPath);
+  try {
+    return open();
+  } catch (e) {
+    if (!existed) throw e;
+
+    // A legacy plaintext DB can't be read with a key. SQLite3MultipleCiphers encrypts
+    // it IN PLACE via `PRAGMA rekey` (no sqlcipher_export / ATTACH needed).
+    console.warn('[db] Existing DB not readable with key — attempting in-place SQLCipher migration (rekey)');
+    try {
+      // Safety copy of the plaintext file before we rewrite it in place.
+      try { fs.copyFileSync(dbPath, dbPath + '.premigrate.bak'); } catch { /* best effort */ }
+      const plain = new Database(dbPath); // opens the plaintext file (no key)
+      try {
+        plain.pragma(`cipher='sqlcipher'`);
+        plain.pragma(`rekey='${dbKey}'`); // encrypts the existing file in place
+      } finally {
+        plain.close(); // release the handle before reopening
+      }
+      const d = open();
+      console.log('[db] Migrated plaintext DB to SQLCipher in place');
+      return d;
+    } catch (migErr) {
+      console.error('[db] Migration failed — backing up DB and starting fresh encrypted', migErr);
+      // Move the old DB + its WAL/SHM aside so a fresh encrypted DB opens cleanly.
+      for (const suffix of ['', '-wal', '-shm']) {
+        const file = dbPath + suffix;
+        try { if (fs.existsSync(file)) fs.renameSync(file, file + '.bak'); } catch { /* best effort */ }
+      }
+      return open();
+    }
+  }
+}
+
 async function initDb() {
   try {
-    const Database = require('better-sqlite3');
+    const Database = require('better-sqlite3-multiple-ciphers');
     const dbPath = path.join(app.getPath('userData'), 'pos.db');
-    db = new Database(dbPath);
+    const dbKey = getOrCreateDbKey();
+    db = openEncryptedDb(Database, dbPath, dbKey);
     db.pragma('journal_mode = WAL');
-    console.log('Database initialized successfully');
+    console.log('Database initialized (SQLCipher-encrypted) successfully');
   } catch (e) {
-    console.warn('Failed to load better-sqlite3, using mock DB for UI preview');
+    console.warn('Failed to load encrypted better-sqlite3, using mock DB for UI preview', e);
     const mockProducts: any = {
       '8901001000011': { id: 'a0000001-0001-0001-0001-000000000001', variant_id: 'b0000001-0001-0001-0001-000000000001', sku: 'MILK-001', barcode: '8901001000011', name: 'Fresh Milk 1L', mrp: 6000, price: 5800, tax_rate: 5 },
       '8901001000028': { id: 'a0000001-0001-0001-0001-000000000002', variant_id: 'b0000001-0001-0001-0001-000000000002', sku: 'BRD-001', barcode: '8901001000028', name: 'Whole Wheat Bread', mrp: 4500, price: 4000, tax_rate: 0 },
@@ -85,6 +198,9 @@ async function initDb() {
       is_weighable BOOLEAN DEFAULT 0,
       quantity BIGINT DEFAULT 0,
       reorder_level BIGINT DEFAULT 0,
+      expiry_date TEXT,
+      plu TEXT,
+      image_thumb TEXT,
       updated_at DATETIME
     );
 
@@ -146,10 +262,14 @@ async function initDb() {
 
   try { db.exec(`ALTER TABLE sales ADD COLUMN payment_mode TEXT DEFAULT 'billing'`); } catch {}
   try { db.exec(`ALTER TABLE sales ADD COLUMN credit_due INTEGER DEFAULT 0`); } catch {}
+  try { db.exec(`ALTER TABLE products ADD COLUMN image_thumb TEXT`); } catch {}
 
   // FIX: Wipe and recreate products table to eliminate all duplicate/broken rows
   // caused by previous sync bugs (price=0, tax_rate=0). Sync will repopulate.
   db.exec(`DROP TABLE IF EXISTS products`);
+  // Products are wiped on every launch, so force the next sync to do a FULL product
+  // pull — otherwise delta-sync would leave the catalog mostly empty after a restart.
+  try { db.exec(`DELETE FROM sync_state WHERE entity IN ('products','inventory','categories')`); } catch {}
   db.exec(`
     CREATE TABLE products (
       id TEXT PRIMARY KEY,
@@ -165,6 +285,9 @@ async function initDb() {
       is_weighable BOOLEAN DEFAULT 0,
       quantity BIGINT DEFAULT 0,
       reorder_level BIGINT DEFAULT 0,
+      expiry_date TEXT,
+      plu TEXT,
+      image_thumb TEXT,
       updated_at DATETIME
     )
   `);
@@ -315,6 +438,11 @@ ipcMain.handle('db:execute', (event, sql, params) => {
 ipcMain.handle('sys:get-path', (event, name) => {
   return app.getPath(name as any);
 });
+
+// OS-encrypted secret store (auth tokens). Sealed via safeStorage in the main process.
+ipcMain.handle('secure:get', (_event, key: string) => secureGet(key));
+ipcMain.handle('secure:set', (_event, key: string, value: string) => { secureSet(key, value); return true; });
+ipcMain.handle('secure:delete', (_event, key: string) => { secureDelete(key); return true; });
 
 ipcMain.handle('print:get-printers', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
