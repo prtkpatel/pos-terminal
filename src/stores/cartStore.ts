@@ -34,28 +34,67 @@ export interface Product {
   image_thumb?: string | null;
 }
 
-// Weighing-scale barcode format (confirmed with the scale vendor): a 13-digit Code-128
-// payload laid out as  prefix(2) + PLU(5) + weight(5) + check(1), weight in grams.
-//   e.g. 2100420013342 → prefix 21, PLU 00420 (=420), weight 01334 (=1.334 kg), check 2
-// Configurable here if a different scale/format is used.
-export const SCALE_BARCODE_CONFIG = {
+export interface ScaleBarcodeConfig {
+  prefix: string;
+  pluLength: number;
+  valueLength: number;
+  valueDecimals: number;
+  includeCheckDigit: boolean;
+  valueType: 'weight' | 'price';
+}
+
+// Default matches the current scale setup: 21 + 5-digit PLU + 5-digit value + final check digit.
+export const DEFAULT_SCALE_BARCODE_CONFIG: ScaleBarcodeConfig = {
   prefix: '21',
   pluLength: 5,
   valueLength: 5,
-  valueDecimals: 3, // 01334 → 1.334
+  valueDecimals: 3,
+  includeCheckDigit: true,
+  valueType: 'weight',
 };
 
-/** Parse a weighing-scale barcode into { plu, weightKg }, or null if it isn't one. */
-export function parseScaleBarcode(code: string, cfg = SCALE_BARCODE_CONFIG): { plu: string; weightKg: number } | null {
+/** Load the scale-barcode config synced from the backend, falling back to defaults. */
+export async function getScaleBarcodeConfig(): Promise<ScaleBarcodeConfig> {
+  if (!db) return DEFAULT_SCALE_BARCODE_CONFIG;
+  try {
+    const row = await db.get("SELECT value FROM settings WHERE key = 'weighted_barcode_config'");
+    if (row?.value) {
+      const parsed = JSON.parse(String(row.value));
+      return { ...DEFAULT_SCALE_BARCODE_CONFIG, ...parsed };
+    }
+  } catch (e: any) {
+    console.warn('[scale] Could not load weighted barcode config:', e.message);
+  }
+  return DEFAULT_SCALE_BARCODE_CONFIG;
+}
+
+export interface ScaleBarcodeParseResult {
+  plu: string;
+  weightKg?: number;
+  pricePaise?: number;
+}
+
+/** Parse a weighing-scale barcode using the synced config. Returns null if it isn't one.
+ *  The prefix may contain non-digits (e.g. "21C"); only the payload after the prefix must be numeric. */
+export function parseScaleBarcode(code: string, cfg = DEFAULT_SCALE_BARCODE_CONFIG): ScaleBarcodeParseResult | null {
   const c = String(code || '').trim();
-  const total = cfg.prefix.length + cfg.pluLength + cfg.valueLength + 1; // +1 check digit
-  if (c.length !== total || !/^\d+$/.test(c) || !c.startsWith(cfg.prefix)) return null;
-  const pluStart = cfg.prefix.length;
-  const pluStr = c.slice(pluStart, pluStart + cfg.pluLength);
-  const valStr = c.slice(pluStart + cfg.pluLength, pluStart + cfg.pluLength + cfg.valueLength);
-  const plu = String(parseInt(pluStr, 10)); // '00420' → '420'
-  const weightKg = parseInt(valStr, 10) / Math.pow(10, cfg.valueDecimals); // '01334' → 1.334
-  if (Number.isNaN(weightKg) || Number.isNaN(parseInt(pluStr, 10))) return null;
+  const total = cfg.prefix.length + cfg.pluLength + cfg.valueLength + (cfg.includeCheckDigit ? 1 : 0);
+  if (c.length !== total || !c.startsWith(cfg.prefix)) return null;
+  const payload = c.slice(cfg.prefix.length);
+  if (!/^\d+$/.test(payload)) return null;
+  const pluStr = payload.slice(0, cfg.pluLength);
+  const valStr = payload.slice(cfg.pluLength, cfg.pluLength + cfg.valueLength);
+  const plu = String(parseInt(pluStr, 10)); // strip leading zeros
+  const rawValue = parseInt(valStr, 10);
+  if (Number.isNaN(rawValue) || Number.isNaN(parseInt(pluStr, 10))) return null;
+
+  if (cfg.valueType === 'price') {
+    // Embedded value is price in fractional units (e.g. 03375 with 2 decimals = ₹33.75 = 3375 paise).
+    const pricePaise = Math.round(rawValue * Math.pow(10, 2 - cfg.valueDecimals));
+    return { plu, pricePaise };
+  }
+
+  const weightKg = rawValue / Math.pow(10, cfg.valueDecimals);
   return { plu, weightKg };
 }
 
@@ -96,7 +135,7 @@ interface CartState {
   clearAddNotice: () => void;
   addItem: (searchTerm: string) => Promise<boolean>;
   addProduct: (product: Product) => boolean;
-  addWeighedByPlu: (plu: string, weightKg: number) => Promise<boolean>;
+  addWeighedByPlu: (plu: string, weightKg: number, valueType?: 'weight' | 'price') => Promise<boolean>;
   searchProducts: (searchTerm: string, limit?: number) => Promise<Product[]>;
   removeItem: (variantId: string) => void;
   updateQty: (variantId: string, qty: number) => void;
@@ -189,7 +228,7 @@ export const useCartStore = create<CartState>((set, get) => ({
     return true;
   },
 
-  addWeighedByPlu: async (plu: string, weightKg: number) => {
+  addWeighedByPlu: async (plu: string, value: number, valueType: 'weight' | 'price' = 'weight') => {
     if (!db) return false;
     const rows = await db.query('SELECT * FROM products WHERE plu = ? LIMIT 1', [plu]);
     const product = rows[0] as Product | undefined;
@@ -197,8 +236,8 @@ export const useCartStore = create<CartState>((set, get) => ({
       set({ addNotice: { type: 'error', message: `Scale item PLU ${plu} not found — add it in the admin panel, then sync.` } });
       return true; // handled — don't fall through to a normal (failing) barcode search
     }
-    if (!(weightKg > 0)) {
-      set({ addNotice: { type: 'error', message: `Could not read a valid weight for ${product.name}.` } });
+    if (!(value > 0)) {
+      set({ addNotice: { type: 'error', message: `Could not read a valid ${valueType} for ${product.name}.` } });
       return true;
     }
     const expiry = getExpiryInfo(product.expiry_date);
@@ -208,35 +247,66 @@ export const useCartStore = create<CartState>((set, get) => ({
     }
 
     const items = [...get().items];
-    const price = BigInt(product.price);
-    const mrp = BigInt(product.mrp);
-    const unitDiscount = mrp > price ? mrp - price : 0n;
     const existingIndex = items.findIndex((i) => i.variantId === product.variant_id);
 
-    if (existingIndex > -1) {
-      // Same weighed item scanned again — accumulate the weight onto the line.
-      const item = items[existingIndex]!;
-      const newQty = item.qty + weightKg;
-      const qf = BigInt(Math.round(newQty * 1000));
-      item.qty = newQty;
-      item.lineTotal = (qf * BigInt(item.price)) / 1000n;
-      item.lineDiscount = (qf * (BigInt(item.mrp) > BigInt(item.price) ? BigInt(item.mrp) - BigInt(item.price) : 0n)) / 1000n;
+    if (valueType === 'price') {
+      // Price-embedded scale label: the value is the total price in paise.
+      const embeddedPrice = BigInt(Math.round(value));
+      if (existingIndex > -1) {
+        const item = items[existingIndex]!;
+        item.qty += 1;
+        item.price = embeddedPrice;
+        item.mrp = embeddedPrice;
+        item.lineTotal = embeddedPrice * BigInt(Math.round(item.qty));
+        item.lineDiscount = 0n;
+      } else {
+        items.push({
+          id: product.id,
+          variantId: product.variant_id,
+          sku: product.sku,
+          barcode: product.barcode,
+          name: product.name,
+          qty: 1,
+          mrp: embeddedPrice,
+          price: embeddedPrice,
+          lineDiscount: 0n,
+          taxRate: product.tax_rate,
+          lineTotal: embeddedPrice,
+          appliedRules: [],
+        });
+      }
     } else {
-      const qf = BigInt(Math.round(weightKg * 1000));
-      items.push({
-        id: product.id,
-        variantId: product.variant_id,
-        sku: product.sku,
-        barcode: product.barcode,
-        name: product.name,
-        qty: weightKg,
-        mrp,
-        price,
-        lineDiscount: (qf * unitDiscount) / 1000n,
-        taxRate: product.tax_rate,
-        lineTotal: (qf * price) / 1000n,
-        appliedRules: [],
-      });
+      // Weight-embedded scale label: value is weight in kg.
+      const weightKg = value;
+      const price = BigInt(product.price);
+      const mrp = BigInt(product.mrp);
+      const unitDiscount = mrp > price ? mrp - price : 0n;
+
+      if (existingIndex > -1) {
+        // Same weighed item scanned again — accumulate the weight onto the line.
+        const item = items[existingIndex]!;
+        const newQty = item.qty + weightKg;
+        const qf = BigInt(Math.round(newQty * 1000));
+        item.qty = newQty;
+        item.lineTotal = (qf * BigInt(item.price)) / 1000n;
+        item.lineDiscount = (qf * (BigInt(item.mrp) > BigInt(item.price) ? BigInt(item.mrp) - BigInt(item.price) : 0n)) / 1000n;
+      } else {
+        const qf = BigInt(Math.round(weightKg * 1000));
+        items.push({
+          id: product.id,
+          variantId: product.variant_id,
+          sku: product.sku,
+          barcode: product.barcode,
+          name: product.name,
+          qty: weightKg,
+          mrp,
+          price,
+          lineDiscount: (qf * unitDiscount) / 1000n,
+          taxRate: product.tax_rate,
+          lineTotal: (qf * price) / 1000n,
+          appliedRules: [],
+        });
+      }
     }
 
     const { subtotal, taxTotal, total } = calculateTotals(items);

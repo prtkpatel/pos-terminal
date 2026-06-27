@@ -97,6 +97,12 @@ export async function apiFetch(path: string, options: RequestInit = {}) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
+  // Avoid stale cached responses (especially for settings/config that change in admin).
+  if (!options.method || options.method.toUpperCase() === 'GET') {
+    headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+    headers['Pragma'] = 'no-cache';
+  }
+
   const res = await fetch(url, { ...options, headers });
 
   if (res.status === 401 && getRefreshToken()) {
@@ -198,6 +204,15 @@ export async function apiGetSettings() {
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     throw new Error(`Settings fetch failed: ${res.status} - ${errBody.message || errBody.code || 'Unknown error'}`);
+  }
+  return res.json();
+}
+
+export async function apiGetWeightedBarcodeConfig() {
+  const res = await apiFetch('/v1/barcode/weighted/config');
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(`Weighted barcode config fetch failed: ${res.status} - ${errBody.message || errBody.code || 'Unknown error'}`);
   }
   return res.json();
 }

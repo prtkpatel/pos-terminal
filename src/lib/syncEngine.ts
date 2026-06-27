@@ -1,5 +1,5 @@
 import { db } from './db';
-import { apiGetSettings, apiSyncPush, apiSyncPull, apiSyncHeartbeat, loadApiConfig, getBaseUrl } from './api';
+import { apiGetSettings, apiGetWeightedBarcodeConfig, apiSyncPush, apiSyncPull, apiSyncHeartbeat, loadApiConfig, getBaseUrl } from './api';
 
 function ean13CheckDigit(base: string): string {
   const digits = base.split('').map(Number);
@@ -140,6 +140,15 @@ export async function pullChanges(): Promise<{ products: number; customers: numb
   }
 
   const tid = await getTerminalId();
+
+  // Pull weighted-barcode config first (best-effort) so the terminal parser matches the scale.
+  try {
+    const weightedConfig = await apiGetWeightedBarcodeConfig();
+    await setSetting('weighted_barcode_config', JSON.stringify(weightedConfig));
+  } catch (e: any) {
+    console.warn('[sync] Could not fetch weighted barcode config:', e.message);
+  }
+
   const result = await apiSyncPull(since, tid);
 
   let productsCount = 0;

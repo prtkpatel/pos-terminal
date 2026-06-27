@@ -14,13 +14,13 @@ import {
   ChevronRight,
   UserPlus
 } from 'lucide-react';
-import { Customer, Product, useCartStore, parseScaleBarcode } from '../stores/cartStore';
+import { Customer, Product, useCartStore, parseScaleBarcode, getScaleBarcodeConfig, ScaleBarcodeConfig, DEFAULT_SCALE_BARCODE_CONFIG } from '../stores/cartStore';
 import { useAuthStore } from '../stores/authStore';
 import { useSyncStore } from '../stores/syncStore';
 import { cn } from '../lib/utils';
 import { db } from '../lib/db';
 import { refreshTerminalSettings } from '../lib/syncEngine';
-import { apiCustomerLookup } from '../lib/api';
+import { apiCustomerLookup, apiGetWeightedBarcodeConfig } from '../lib/api';
 
 interface HeldSale {
   id: string;
@@ -159,6 +159,22 @@ export function CheckoutScreen() {
   const payModalJustOpenedRef = useRef(false);
   const amountInputRef = useRef<HTMLInputElement>(null);
   const customerNameEditedRef = useRef(false);
+  const scaleConfigRef = useRef<ScaleBarcodeConfig>(DEFAULT_SCALE_BARCODE_CONFIG);
+  const [qtyDrafts, setQtyDrafts] = useState<Record<string, string>>({});
+
+  const setQtyDraft = (variantId: string, raw: string) => setQtyDrafts(prev => ({ ...prev, [variantId]: raw }));
+  const clearQtyDraft = (variantId: string) => setQtyDrafts(prev => { const next = { ...prev }; delete next[variantId]; return next; });
+  const commitQtyDraft = (variantId: string, rawOverride?: string) => {
+    const raw = rawOverride ?? qtyDrafts[variantId];
+    if (raw === undefined) return;
+    const num = Number(raw);
+    if (!String(raw).trim() || !Number.isFinite(num) || num <= 0) {
+      updateQty(variantId, 0);
+    } else {
+      updateQty(variantId, Math.round(num * 1000) / 1000);
+    }
+    clearQtyDraft(variantId);
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -189,6 +205,38 @@ export function CheckoutScreen() {
     window.addEventListener('terminal-setting-updated', onSettingUpdated);
     return () => { mounted = false; };
   }, []);
+
+  // Load weighted-barcode config from local SQLite (synced from backend).
+  useEffect(() => {
+    let mounted = true;
+    const loadConfig = async () => {
+      const cfg = await getScaleBarcodeConfig();
+      if (mounted) scaleConfigRef.current = cfg;
+      // Also refresh directly from backend when online so admin setting changes
+      // are picked up immediately instead of waiting for the next periodic sync.
+      if (isOnline) {
+        try {
+          const remote = await apiGetWeightedBarcodeConfig();
+          if (mounted) scaleConfigRef.current = { ...DEFAULT_SCALE_BARCODE_CONFIG, ...remote };
+        } catch {
+          // ignore — keep locally cached config
+        }
+      }
+    };
+    void loadConfig();
+    const onSettingUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ key: string; value: string }>).detail;
+      if (detail?.key === 'weighted_barcode_config') {
+        try {
+          scaleConfigRef.current = { ...DEFAULT_SCALE_BARCODE_CONFIG, ...JSON.parse(detail.value) };
+        } catch {
+          scaleConfigRef.current = DEFAULT_SCALE_BARCODE_CONFIG;
+        }
+      }
+    };
+    window.addEventListener('terminal-setting-updated', onSettingUpdated);
+    return () => { mounted = false; };
+  }, [isOnline]);
 
   // Reset round-off whenever cart total changes (e.g. item added/removed)
   useEffect(() => { setRoundOff(0n); }, [total]);
@@ -365,15 +413,28 @@ export function CheckoutScreen() {
     const term = rawTerm.trim();
     if (!term) return;
 
-    // Weighing-scale barcode (prefix 21 + PLU + weight)? Resolve PLU → product and
-    // add the embedded weight as the line quantity, before the normal barcode search.
-    const scale = parseScaleBarcode(term);
+    // Weighing-scale barcode? Resolve PLU → product and add the embedded weight/price,
+    // before the normal barcode search.
+    const cfg = scaleConfigRef.current;
+    const scale = parseScaleBarcode(term, cfg);
     if (scale) {
-      await addWeighedByPlu(scale.plu, scale.weightKg);
+      if (cfg.valueType === 'price' && scale.pricePaise != null) {
+        await addWeighedByPlu(scale.plu, scale.pricePaise, 'price');
+      } else if (scale.weightKg != null) {
+        await addWeighedByPlu(scale.plu, scale.weightKg, 'weight');
+      }
       setSelectedVariantId('');
       setBarcodeInput('');
       setProductSuggestions([]);
       setShowSuggestions(false);
+      return;
+    }
+
+    // Guard: a code that starts with the weighted prefix but could not be parsed is
+    // almost certainly a scale label. Do NOT fall through to normal product search.
+    if (cfg.prefix && term.startsWith(cfg.prefix)) {
+      setBarcodeInput(term);
+      openAlert(`Scale barcode not recognized for prefix "${cfg.prefix}". Check Barcode/Scale settings.`, () => focusBarcodeInput());
       return;
     }
 
@@ -1433,20 +1494,15 @@ export function CheckoutScreen() {
                   <td className="pos-table-td font-bold">{item.name}</td>
                   <td className="pos-table-td text-center">
                     <div className="flex items-center justify-center gap-1.5">
-                      <button type="button" tabIndex={-1} onClick={() => item.qty <= 1 ? removeItem(item.variantId) : updateQty(item.variantId, item.qty - 1)} className="text-slate-400 hover:text-blue-600">-</button>
+                      <button type="button" tabIndex={-1} onClick={() => { clearQtyDraft(item.variantId); item.qty <= 0.001 ? removeItem(item.variantId) : updateQty(item.variantId, item.qty - 1); }} className="text-slate-400 hover:text-blue-600">-</button>
                       <input
                         type="number"
-                        min="1"
-                        step="1"
-                        value={item.qty}
+                        min="0.001"
+                        step="0.001"
+                        value={qtyDrafts[item.variantId] ?? item.qty}
                         data-qty-input={item.variantId}
                         aria-label={`Quantity for ${item.name}`}
-                        onChange={(event) => {
-                          const nextQty = Number(event.target.value);
-                          if (Number.isFinite(nextQty)) {
-                            updateQty(item.variantId, Math.max(1, Math.floor(nextQty)));
-                          }
-                        }}
+                        onChange={(event) => setQtyDraft(item.variantId, event.target.value)}
                         onKeyDown={(event) => {
                           if (event.key === 'Backspace' && item.qty === 0) {
                             const idx = items.findIndex(i => i.variantId === item.variantId);
@@ -1465,6 +1521,7 @@ export function CheckoutScreen() {
                           const isEnter = event.key === 'Enter';
                           if (isTab || isArrowVertical || isEnter) {
                             event.preventDefault();
+                            commitQtyDraft(item.variantId);
                             const allInputs = Array.from(document.querySelectorAll('input[data-qty-input]')) as HTMLInputElement[];
                             const currentIdx = allInputs.findIndex(input => input === event.currentTarget);
                             // Fallback to document.activeElement when event target is out of sync
@@ -1501,6 +1558,7 @@ export function CheckoutScreen() {
                           }
                         }}
                         onBlur={(event) => {
+                          commitQtyDraft(item.variantId);
                           // If this element is being removed from DOM while focused,
                           // browser focus might get stuck. We help it out.
                           if (skipBlurFocusRef.current) return;
@@ -1519,7 +1577,7 @@ export function CheckoutScreen() {
                         onClick={(event) => event.stopPropagation()}
                         className="h-7 w-14 rounded border border-slate-300 bg-white text-center text-xs font-black text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-500/50 focus:bg-white transition-all"
                       />
-                      <button type="button" tabIndex={-1} onClick={() => updateQty(item.variantId, item.qty + 1)} className="text-slate-400 hover:text-blue-600">+</button>
+                      <button type="button" tabIndex={-1} onClick={() => { clearQtyDraft(item.variantId); updateQty(item.variantId, item.qty + 1); }} className="text-slate-400 hover:text-blue-600">+</button>
                     </div>
                   </td>
                   <td className="pos-table-td text-right">{(Number(item.mrp) / 100).toFixed(2)}</td>
