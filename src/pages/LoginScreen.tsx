@@ -34,7 +34,7 @@ export function LoginScreen() {
     <div className="flex h-full w-full items-center justify-center bg-slate-900">
       <div className="w-full max-w-sm rounded-xl border border-slate-700 bg-slate-800 p-8 shadow-2xl">
         <div className="mb-6 text-center">
-          <div className="text-2xl font-black text-white tracking-tight">Subhraj Mini Mart</div>
+          <div className="text-2xl font-black text-white tracking-tight">Shubhraj Mini Mart</div>
           <div className="mt-1 text-xs font-bold uppercase tracking-widest text-slate-400">Terminal Login</div>
         </div>
 

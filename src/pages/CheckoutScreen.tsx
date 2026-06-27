@@ -1720,7 +1720,7 @@ export function CheckoutScreen() {
               <div className="flex justify-center">
                 <div className="receipt-preview printable-receipt w-[320px] bg-white px-3 py-4 font-mono text-[11px] leading-tight text-slate-950 shadow-xl">
                   <div className="text-center">
-                    <div className="text-base font-black tracking-wide">{storeInfo.name || 'Subhraj Mini Mart'}</div>
+                    <div className="text-base font-black tracking-wide">{storeInfo.name || 'Shubhraj Mini Mart'}</div>
                     <div>Tax Invoice / Bill of Supply</div>
                     {storeInfo.address ? <div>{storeInfo.address}</div> : null}
                     {storeInfo.phone ? <div>Mob: {storeInfo.phone}</div> : null}

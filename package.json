@@ -23,7 +23,7 @@
   },
   "build": {
     "appId": "com.subhrajminimart.pos.terminal",
-    "productName": "Subhraj Mini Mart POS",
+    "productName": "Shubhraj Mini Mart POS",
     "directories": {
       "output": "release"
     },

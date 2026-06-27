@@ -380,7 +380,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
-    title: "Subhraj Mini Mart POS - Desktop Terminal",
+    title: "Shubhraj Mini Mart POS - Desktop Terminal",
     backgroundColor: '#0f172a', // Slate 900
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
