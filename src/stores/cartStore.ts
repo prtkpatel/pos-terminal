@@ -529,12 +529,30 @@ export const useCartStore = create<CartState>((set, get) => ({
     }
 
     // Build sync payload for backend
-    const settingsRows = await db.query("SELECT key, value FROM settings WHERE key IN ('store_id','terminal_id','shift_id')");
+    const settingsRows = await db.query("SELECT key, value FROM settings WHERE key IN ('store_id','terminal_id','shift_id','terminal_epoch')");
     const settings: Record<string, string> = {};
     for (const r of settingsRows) settings[r.key] = r.value ?? '';
 
-    // Stable outbox op_id — one entry per invoice, re-saves replace it rather than add.
-    const stableOpId = `sale-${invoiceNo}`;
+    // terminal_epoch: an 8-char hex token set once per install. It changes when the terminal is
+    // re-provisioned, which means op_ids and clientOpIds are unique across invoice counter resets.
+    let epoch = settings.terminal_epoch;
+    if (!epoch) {
+      // First-time setup: generate and persist.
+      const buf = new Uint8Array(4);
+      crypto.getRandomValues(buf);
+      epoch = Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join('');
+      await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('terminal_epoch', ?)", [epoch]);
+      settings.terminal_epoch = epoch;
+    }
+
+    // Stable outbox op_id — includes epoch so it cannot collide with a previous install's bills.
+    const stableOpId = `sale-${epoch}-${invoiceNo}`;
+
+    // Also check the legacy op_id format (sale-{invoiceNo}) in case this bill was saved before
+    // the epoch was introduced. Only skip if THAT entry is already synced.
+    const legacyOpId = `sale-${invoiceNo}`;
+    const existingLegacy = await db.get("SELECT status FROM outbox WHERE op_id = ?", [legacyOpId]);
+    if (existingLegacy?.status === 'synced') return;
 
     // Check if this invoice was already successfully synced to the server.
     // If so, skip re-enqueuing entirely to prevent server-side duplicates.
@@ -544,19 +562,16 @@ export const useCartStore = create<CartState>((set, get) => ({
     );
     if (existingOutbox?.status === 'synced') return;
 
-    // Stable clientOpId derived from terminal + invoice number so the backend's
-    // idempotency check (WHERE clientOpId = ?) fires correctly on re-saves.
-    // Format: reuse terminal UUID structure, replace last segment with invoice hex.
-    const termId = (settings.terminal_id || '00000000-0000-0000-0000-000000000000');
-    const hex = termId.replace(/[^a-f0-9]/gi, '').padStart(20, '0').slice(0, 20);
+    // Stable clientOpId derived from epoch + invoice number.
+    // Using epoch (not terminal_id) ensures uniqueness across counter resets.
+    const epochHex = epoch.padStart(20, '0').slice(0, 20);
     const invHex = invoiceNo.toString(16).padStart(12, '0');
-    const stableClientOpId = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${invHex}`;
+    const stableClientOpId = `${epochHex.slice(0,8)}-${epochHex.slice(8,12)}-${epochHex.slice(12,16)}-${epochHex.slice(16,20)}-${invHex}`;
 
-    // Remove any old duplicate pending/failed outbox entries for this invoice that
-    // were created before this fix (random op_ids, random clientOpIds).
+    // Remove legacy (pre-epoch) pending/failed outbox entries for this invoice so we don't push duplicates.
     await db.execute(
-      `DELETE FROM outbox WHERE entity = 'order' AND action = 'create' AND status != 'synced' AND op_id != ? AND payload LIKE ?`,
-      [stableOpId, `%INV-${invoiceNo}"%`]
+      `DELETE FROM outbox WHERE entity = 'order' AND action = 'create' AND status != 'synced' AND op_id != ? AND op_id = ?`,
+      [stableOpId, legacyOpId]
     );
 
     const payload: Record<string, unknown> = {

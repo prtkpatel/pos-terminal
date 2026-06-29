@@ -1,5 +1,5 @@
 import { db } from './db';
-import { apiGetSettings, apiGetWeightedBarcodeConfig, apiSyncPush, apiSyncPull, apiSyncHeartbeat, loadApiConfig, getBaseUrl } from './api';
+import { apiFetch, apiGetSettings, apiGetWeightedBarcodeConfig, apiSyncPush, apiSyncPull, apiSyncHeartbeat, loadApiConfig, getBaseUrl } from './api';
 
 function ean13CheckDigit(base: string): string {
   const digits = base.split('').map(Number);
@@ -13,6 +13,9 @@ function normalizeBarcode(barcode: string): string {
   }
   return barcode;
 }
+
+const isUuid = (v: unknown): v is string =>
+  typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 
 let cachedTerminalId = '';
 
@@ -51,6 +54,40 @@ export async function pushOutbox(): Promise<{ pushed: number; failed: number }> 
   if (!db) return { pushed: 0, failed: 0 };
   await loadApiConfig();
 
+  // Fetch the current shift_id stored in settings — used below to repair bills whose
+  // payload has a zero-UUID or missing shiftId (the most common reason for sync failure).
+  let currentShiftId: string | null = null;
+  try {
+    const s = await db.get("SELECT value FROM settings WHERE key = 'shift_id'");
+    if (s?.value && isUuid(s.value) && s.value !== '00000000-0000-0000-0000-000000000000') {
+      currentShiftId = s.value;
+    }
+  } catch { /* ignore */ }
+
+  // Revive bills that permanently failed with "Shift is not open" now that we have a
+  // valid shiftId. They exceeded the retry limit, so the normal query won't pick them
+  // up — reset them to pending so they sync on this pass.
+  if (currentShiftId) {
+    try {
+      const shiftFailed = await db.query(
+        "SELECT op_id, payload FROM outbox WHERE entity = 'order' AND status = 'failed' AND error LIKE '%Shift is not open%'",
+        []
+      );
+      for (const row of shiftFailed as any[]) {
+        try {
+          const p = JSON.parse(row.payload as string);
+          if (!isUuid(p.shiftId) || p.shiftId === '00000000-0000-0000-0000-000000000000') {
+            p.shiftId = currentShiftId;
+            await db.execute(
+              "UPDATE outbox SET status = 'pending', retry_count = 0, error = NULL, payload = ? WHERE op_id = ?",
+              [JSON.stringify(p), row.op_id]
+            );
+          }
+        } catch { /* ignore individual row errors */ }
+      }
+    } catch { /* ignore */ }
+  }
+
   const pending = await db.query(
     "SELECT * FROM outbox WHERE status = 'pending' OR (status = 'failed' AND retry_count < 50) ORDER BY created_at ASC LIMIT 50",
     []
@@ -63,8 +100,6 @@ export async function pushOutbox(): Promise<{ pushed: number; failed: number }> 
   // cashier id (e.g. "admin"), which the server rejects as an unknown cashier. Before
   // pushing, swap any non-UUID cashierId for a real server user id cached in the
   // cashiers table (populated on the last successful online login / seed).
-  const isUuid = (v: any) =>
-    typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
   let serverCashierId: string | null = null;
   try {
     const c = await db.get("SELECT id FROM cashiers WHERE id GLOB '*-*-*-*-*' LIMIT 1");
@@ -75,8 +110,15 @@ export async function pushOutbox(): Promise<{ pushed: number; failed: number }> 
 
   const ops = pending.map((row: any) => {
     const payload = JSON.parse(row.payload);
-    if (row.entity === 'order' && !isUuid(payload.cashierId) && serverCashierId) {
-      payload.cashierId = serverCashierId;
+    if (row.entity === 'order') {
+      if (!isUuid(payload.cashierId) && serverCashierId) {
+        payload.cashierId = serverCashierId;
+      }
+      // Repair missing/zero shiftId on the fly — covers bills saved before the shift was
+      // provisioned. The payload in SQLite is also updated so retries carry the fix.
+      if (currentShiftId && (!isUuid(payload.shiftId) || payload.shiftId === '00000000-0000-0000-0000-000000000000')) {
+        payload.shiftId = currentShiftId;
+      }
     }
     return { opId: row.op_id, entity: row.entity, action: row.action, payload };
   });
@@ -280,6 +322,45 @@ export async function refreshTerminalSettings(): Promise<{ gstEnabled: boolean }
     }
 
     await setSyncState('settings', new Date().toISOString());
+
+    // Auto-provision the current open shift for this terminal so every sale payload
+    // gets a valid shiftId. Without this, offline bills always fail to sync because
+    // salesService.create() requires an open shift on the backend.
+    try {
+      const termId = await getTerminalId();
+      const storeRow = await db.get("SELECT value FROM settings WHERE key = 'store_id'");
+      const storeId = storeRow?.value as string | undefined;
+      if (isUuid(termId) && isUuid(storeId)) {
+        let shiftId: string | null = null;
+        const currentRes = await apiFetch(`/v1/shifts/current/${termId}`);
+        if (currentRes.ok) {
+          const shift = await currentRes.json();
+          if (shift?.id) shiftId = shift.id as string;
+        }
+        if (!shiftId) {
+          // No open shift — open one automatically for this cashier session.
+          const openRes = await apiFetch('/v1/shifts/open', {
+            method: 'POST',
+            body: JSON.stringify({ storeId, terminalId: termId, openingFloat: 0 }),
+          });
+          if (openRes.ok) {
+            const shift = await openRes.json();
+            if (shift?.id) shiftId = shift.id as string;
+          } else if (openRes.status === 409) {
+            // Race: another process just opened a shift — re-fetch it.
+            const retry = await apiFetch(`/v1/shifts/current/${termId}`);
+            if (retry.ok) {
+              const shift = await retry.json();
+              if (shift?.id) shiftId = shift.id as string;
+            }
+          }
+        }
+        if (shiftId) await setSetting('shift_id', shiftId);
+      }
+    } catch (e: any) {
+      console.warn('[sync] Shift provisioning failed:', e.message);
+    }
+
     return { gstEnabled };
   } catch (error) {
     console.warn('[sync] Settings refresh failed:', error);
